@@ -227,7 +227,7 @@ ThingsBoard 성능에 영향을 주지 않는 것을 **최우선 요구사항**�
 | LLM | Anthropic Python SDK (`anthropic`), 모델 `claude-opus-5-5`, 구조화 출력, Message Batches API | 키 의미 추론·설명 생성 (§5.0 (2-1)) |
 | 프론트엔드 | React + TypeScript + Vite, TanStack Query | |
 | 시각화 | Cytoscape.js(관계 그래프), Apache ECharts(히트맵·시계열·산점도) | 수천 노드 그래프 렌더링, 대용량 차트 성능 |
-| 배포 | Docker Compose (app, db, redis) | 온프레미스 ThingsBoard 환경과 함께 배포 용이 |
+| 배포 | Docker Compose (api, scheduler, web — SQLite·Parquet는 볼륨 마운트) | 온프레미스 ThingsBoard 환경과 함께 배포 용이 |
 | 테스트 | pytest, respx(HTTP 모킹), Testcontainers + `thingsboard/tb-postgres` | 실제 TB 대상 통합 테스트 |
 
 ### 4.2 내부 데이터 모델 (요약)
