@@ -6,3 +6,12 @@ tb_diagnose_report*/
 details.jsonl
 .env
 seed_truth.json
+
+# backend
+backend/.venv/
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+*.egg-info/
