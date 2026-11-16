@@ -8,7 +8,8 @@ ThingsBoard에 부하를 주지 않도록 백그라운드에서 천천히 수집
 
 ## 현재 단계
 
-Phase 0 — 사전 진단 스크립트 완료. 운영 TB에서 실행 후 `summary.md`를 공유받아 수집 정책을 확정합니다.
+Phase 0 — 사전 진단 스크립트, 테스트 TB 환경(`deploy/test-env`), 시드 데이터, Cassandra 실측 완료.
+운영 TB 사전 진단 결과(`summary.md`)를 받으면 수집 정책을 확정하고 Phase 1로 넘어갑니다.
 
 ## 테스트
 

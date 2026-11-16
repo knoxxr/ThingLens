@@ -70,3 +70,41 @@ python3 tb_diagnose.py --url ... --username ... --ca-bundle /path/company-ca.pem
 python3 -m unittest discover -s tests -v
 ```
 모의 TB 서버(`tests/mock_tb_server.py`)로 로그인·토큰 갱신·429 재시도·리포트 익명성까지 검증합니다.
+
+실제 환경 검증: ThingsBoard CE 4.3.1 + Cassandra 4.1(`deploy/test-env`)에 시드 데이터를 넣고 실행해, 1초 키 4개·불규칙 키·비활성 키·관계 없는 디바이스·키 이름 변형을 모두 정확히 검출함을 확인했습니다. TB 버전도 API로 자동 확인됩니다(4.3.1).
+
+---
+
+# 개발·테스트용 도구
+
+## 테스트 ThingsBoard 환경 (`deploy/test-env`)
+
+운영과 같은 저장 구조(엔티티 PostgreSQL / 시계열 Cassandra)의 ThingsBoard CE를 띄웁니다.
+
+```bash
+./deploy/test-env/up.sh          # 최초 1회 스키마 설치 포함 약 3분, 이후 1분 내외
+# http://localhost:8080  (tenant@thingsboard.org / tenant)
+docker compose -f deploy/test-env/docker-compose.yml down -v   # 완전 삭제
+```
+환경변수: `TB_VERSION`(기본 `4.3.1-latest`), `TB_PORT`(기본 8080), `CASSANDRA_PORT`(기본 9042)
+
+## 시드 데이터 (`seed_thingsboard.py`) — ⚠ 테스트 TB 전용 (쓰기 작업)
+
+정답이 알려진 시나리오 12종(1초 키, 키 이름 변형, 값 고정 센서, 상관 붕괴, 5초 지연 상관, 중복 센서,
+속성 불일치, 범위 이탈, 누락 관계, 비활성 키 등)을 적재하고 정답 파일 `seed_truth.json`을 만듭니다.
+localhost 가 아닌 주소에는 `--allow-remote` 없이 실행되지 않습니다.
+
+```bash
+TB_PASSWORD=tenant python3 tools/seed_thingsboard.py      # 약 35초, 값 약 27만 개
+```
+
+## Cassandra 수집 방식 실측 (`bench_agg_vs_raw.py`)
+
+같은 키·구간을 서버 집계/원시값으로 조회해 응답 시간과 Cassandra 읽기 횟수를 비교합니다 (읽기 전용).
+결과와 결론: `docs/phase0/cassandra-benchmark.md`
+
+```bash
+TB_PASSWORD=tenant python3 tools/bench_agg_vs_raw.py --url http://localhost:8080 \
+    --username tenant@thingsboard.org --device PUMP-A1 --key current --hours 6 \
+    --cassandra-container thinglens-test-cassandra-1
+```

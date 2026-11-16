@@ -5,3 +5,4 @@ __pycache__/
 tb_diagnose_report*/
 details.jsonl
 .env
+seed_truth.json

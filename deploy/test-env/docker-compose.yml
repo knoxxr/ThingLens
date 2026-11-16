@@ -1,0 +1,59 @@
+# ThingLens 개발·테스트용 ThingsBoard 환경
+#   - ThingsBoard CE (PE 전용 기능은 모의 서버로 테스트)
+#   - 엔티티: PostgreSQL / 시계열: Cassandra  ← 운영 환경(Cassandra 별도 서버)과 같은 저장 구조
+# 사용: ./up.sh  (최초 1회 스키마 설치 + 데모 데이터 포함)
+name: thinglens-test
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: thingsboard
+      POSTGRES_USER: tb
+      POSTGRES_PASSWORD: tb
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tb -d thingsboard"]
+      interval: 5s
+      retries: 30
+
+  cassandra:
+    image: cassandra:4.1
+    environment:
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 256M
+    ports:
+      - "${CASSANDRA_PORT:-9042}:9042"   # Cassandra 직접 읽기 모드 실험용
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1"]
+      interval: 10s
+      retries: 30
+
+  tb:
+    image: thingsboard/tb-node:${TB_VERSION:-4.3.1-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+    ports:
+      - "${TB_PORT:-8080}:8080"
+    environment:
+      TB_SERVICE_ID: tb-test
+      TB_QUEUE_TYPE: in-memory
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
+      SPRING_DATASOURCE_USERNAME: tb
+      SPRING_DATASOURCE_PASSWORD: tb
+      DATABASE_TS_TYPE: cassandra
+      DATABASE_TS_LATEST_TYPE: cassandra
+      CASSANDRA_URL: cassandra:9042
+      CASSANDRA_LOCAL_DATACENTER: datacenter1
+      CASSANDRA_KEYSPACE_NAME: thingsboard
+      JAVA_OPTS: "-Xms1g -Xmx2g"
+
+volumes:
+  pg-data:
+  cassandra-data:
