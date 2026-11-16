@@ -680,7 +680,11 @@ ThingLens/
 ## 12. 다음 단계
 
 1. §10 확인 필요 사항 회신
-2. Phase 0 착수: 사전 진단 스크립트 작성 → 운영 TB에서 실행, 로컬 TB PE + Cassandra Docker 환경 + 시드 데이터 스크립트 작성
+2. Phase 0 진행 상황
+   - [x] 사전 진단 스크립트 `tools/tb_diagnose.py` (표준 라이브러리만, 읽기 전용, 모의 TB 서버로 테스트) — 사용법 `tools/README.md`
+   - [ ] 운영 TB에서 진단 실행 → `summary.md` 공유
+   - [ ] 로컬 TB PE + Cassandra Docker 환경 + 시드 데이터 스크립트 (PE 라이선스 키 필요)
+   - [ ] Cassandra 수집 방식 실측 (서버 집계 vs 원시값)
 3. 저장소 골격(backend/frontend, CI) 생성
 
 ---

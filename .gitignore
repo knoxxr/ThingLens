@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+# 진단 결과물 (엔티티 이름 포함 가능)
+tb_diagnose_report*/
+details.jsonl
+.env
