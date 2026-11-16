@@ -116,6 +116,10 @@ MIGRATIONS = [
     """
     ALTER TABLE sync_cycle ADD COLUMN full INTEGER NOT NULL DEFAULT 0;
     """,
+    # v3 — 워커가 실제로 적용 중인 설정 (API가 자기 설정 대신 이것을 보여주도록)
+    """
+    ALTER TABLE scheduler_state ADD COLUMN worker_config TEXT;
+    """,
 ]
 
 

@@ -63,6 +63,8 @@ def test_scheduler_control_requires_admin_and_is_audited(api, conn):
     st = api.get("/api/scheduler", headers=ha).json()
     assert st["requests_15m"]["count"] > 0 and st["worker_alive"] is True
     assert st["cycles"][0]["status"] == "DONE"
+    assert st["rate_max"] == 1000.0 and st["rate_windows"] == []   # 워커 설정 (API 설정 아님)
+    assert st["worker_config"]["detail_sync_interval_h"] == 24.0
     assert api.post("/api/scheduler/pause", headers=ha).status_code == 403
     h = login(api, "admin", "admin-pass-1")
     assert api.post("/api/scheduler/pause", headers=h).json() == {"paused": True}
@@ -98,3 +100,46 @@ def test_user_management(api, fleet):
     assert {e["name"] for e in api.get("/api/entities", headers=hv).json()["items"]} == {"Line-B", "TS-B1"}
     api.post("/api/auth/logout", headers=hv)
     assert api.get("/api/me", headers=hv).status_code == 401
+
+
+def test_metrics_and_customers(api, fleet):
+    h = login(api, "admin", "admin-pass-1")
+    m = api.get("/api/scheduler/metrics?minutes=10", headers=h).json()
+    assert len(m) == 10 and sum(b["requests"] for b in m) > 0
+    titles = {c["title"]: c["entities"] for c in api.get("/api/customers", headers=h).json()}
+    assert titles == {"Customer A": 2, "Customer A-Sub": 1, "Customer B": 2}
+    hc = login(api, "cust-a", "cust-a-pass")
+    assert {c["title"] for c in api.get("/api/customers", headers=hc).json()} == {"Customer A", "Customer A-Sub"}
+
+
+def test_serves_web_app_with_spa_fallback(settings, conn, tmp_path):
+    web = tmp_path / "dist"
+    (web / "assets").mkdir(parents=True)
+    (web / "index.html").write_text("<html>app</html>")
+    (web / "assets" / "app.js").write_text("console.log(1)")
+    (tmp_path / "secret.txt").write_text("nope")
+    settings.web_dir = str(web)
+    c = TestClient(create_app(settings))
+    assert c.get("/").text == "<html>app</html>"
+    assert c.get("/entities/abc").text == "<html>app</html>"     # SPA 경로
+    assert c.get("/assets/app.js").text == "console.log(1)"
+    assert "nope" not in c.get("/../secret.txt").text            # 디렉터리 탈출 차단
+    assert c.get("/api/unknown").status_code == 404
+
+
+def test_entity_list_counts_and_facets(api):
+    h = login(api, "admin", "admin-pass-1")
+    items = {e["name"]: e for e in api.get("/api/entities", headers=h).json()["items"]}
+    assert items["ORPHAN"]["relation_count"] == 0 and items["PUMP-A"]["key_count"] == 3
+    assert items["Line-A"]["relation_count"] == 2
+    facets = {(f["entity_type"], f["profile"]): f["n"] for f in api.get("/api/entities-facets", headers=h).json()}
+    assert facets[("DEVICE", "TempSensor")] == 3 and facets[("ASSET", "Line")] == 2
+
+
+def test_relation_change_includes_target_name(api, conn, worker, fleet, tb):
+    tb.relations = [r for r in tb.relations if r[2] != fleet["pump_a"]]
+    q.enqueue(conn, "START_CYCLE", {"full": True}, q.PRIO_CYCLE, "cycle")
+    worker.run_until_idle()
+    h = login(api, "admin", "admin-pass-1")
+    rel = [c for c in api.get("/api/changes?change_type=RELATION_REMOVED", headers=h).json()]
+    assert rel[0]["before"]["to_name"] == "PUMP-A" and rel[0]["entity_name"] == "Line-A"

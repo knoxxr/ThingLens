@@ -55,6 +55,9 @@ class Settings:
     # 앱 로그인
     session_ttl_h: float = 12.0
 
+    # 웹 화면 (빌드 결과 디렉터리). 없으면 API만 제공
+    web_dir: str | None = None
+
     @classmethod
     def from_env(cls) -> "Settings":
         s = cls()
@@ -77,4 +80,5 @@ class Settings:
         s.detail_sync_interval_h = _env("THINGLENS_DETAIL_SYNC_INTERVAL_H", s.detail_sync_interval_h, float)
         s.profile_interval_d = _env("THINGLENS_PROFILE_INTERVAL_D", s.profile_interval_d, float)
         s.session_ttl_h = _env("THINGLENS_SESSION_TTL_H", s.session_ttl_h, float)
+        s.web_dir = _env("THINGLENS_WEB_DIR", s.web_dir)
         return s

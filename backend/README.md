@@ -26,7 +26,7 @@ ThingsBoard를 **저부하로 천천히** 읽어 로컬 DB(SQLite)에 메타데�
 | **[I] 변경 이력** | 엔티티 추가·삭제·이름/라벨/프로파일/소유자 변경, 관계·속성·키 추가/삭제/변경 | `sync/handlers.py` |
 | **[D] 접근 제어** | 로그인(scrypt), 역할(ADMIN/ANALYST/CUSTOMER_VIEWER), 고객(+하위 고객) 범위 필터, 감사 로그 | `auth/users.py`, `api/app.py` |
 
-**아직 없음 (Phase 1 남은 일)**: 웹 화면(스케줄러 상태·엔티티 탐색) — 지금은 REST API로만 확인 가능
+웹 화면은 `frontend/`(사용법 `frontend/README.md`). `THINGLENS_WEB_DIR`를 지정하면 API 서버가 화면도 함께 제공합니다.
 
 ### 변경 감지 지연 (저부하를 위한 절충)
 
@@ -66,6 +66,9 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | `THINGLENS_DETAIL_SYNC_INTERVAL_H` | 24 | 관계·속성·키 재확인 주기 |
 | `THINGLENS_PROFILE_INTERVAL_D` | 7 | 키 보고 주기 재측정 주기 |
 | `TB_CA_BUNDLE` / `TB_VERIFY_TLS` | - / true | 사내 인증서 |
+| `THINGLENS_WEB_DIR` | - | 빌드된 웹 화면 경로 (`frontend/dist`). 지정 시 `/` 에서 화면 제공 |
+
+수집 관련 설정은 **워커(`thinglens scheduler`) 프로세스의 환경변수**가 기준입니다. 워커가 실제 적용 중인 값을 DB에 기록하고, 화면은 그 값을 보여줍니다.
 
 ## REST API
 
@@ -74,9 +77,12 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | POST | `/api/auth/login`, `/api/auth/logout` | - | 로그인(토큰 발급)·로그아웃 |
 | GET | `/api/me` | 로그인 | 내 정보 |
 | GET | `/api/scheduler` | ADMIN·ANALYST | 워커 상태, 현재 속도·시간대 창, 최근 15분 요청 수·지연·부하 오류, 큐, 최근 주기 |
+| GET | `/api/scheduler/metrics?minutes=` | ADMIN·ANALYST | 분 단위 TB 요청 수·p95 지연·부하 오류 (차트용) |
 | POST | `/api/scheduler/pause`, `/resume`, `/sync-now?full=` | ADMIN | 제어 (감사 기록) |
 | GET | `/api/entities?entity_type=&q=&profile=` | 로그인(범위 적용) | 엔티티 목록 |
+| GET | `/api/entities-facets` | 로그인(범위 적용) | 유형·프로파일별 엔티티 수 (필터용) |
 | GET | `/api/entities/{id}` | 로그인(범위 적용) | 관계(in/out)·속성·키(보고 주기·등급) |
+| GET | `/api/customers` | 로그인(범위 적용) | 고객 목록·소유 엔티티 수 |
 | GET | `/api/changes?entity_id=&change_type=&since_ms=` | 로그인(범위 적용) | 변경 이력 |
 | GET | `/api/catalog/tiers` | 로그인(범위 적용) | 키 보고 주기 등급 분포 |
 | GET/POST | `/api/users` | ADMIN | 사용자 관리 |
@@ -87,7 +93,7 @@ API 문서(자동): `http://<서버>:8000/docs`
 ## 테스트
 
 ```bash
-.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (33개)
+.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (37개)
 THINGLENS_IT_TB_URL=http://localhost:8080 .venv/bin/pytest -m integration -s   # 실제 테스트 TB (deploy/test-env + 시드)
 ```
 

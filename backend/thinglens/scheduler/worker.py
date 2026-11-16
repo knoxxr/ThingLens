@@ -14,7 +14,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ..config import Settings
-from ..db import now_ms
+from ..db import dumps, now_ms
 from ..sync.handlers import HANDLERS, Ctx
 from ..tb.adapter import TbAdapter
 from ..tb.client import CircuitOpen, TbClient, TbError
@@ -34,6 +34,12 @@ class Worker:
         self._last_housekeeping = 0
         client._on_request = self._log_request
         q.reset_running(conn)  # 비정상 종료 후 재시작 → 이어서 수행
+        conn.execute("UPDATE scheduler_state SET worker_config=? WHERE id=1", (dumps({
+            "rate_max": settings.rate_max, "rate_windows": settings.rate_windows,
+            "rate_default_factor": settings.rate_default_factor, "timezone": settings.timezone,
+            "meta_sync_interval_h": settings.meta_sync_interval_h,
+            "detail_sync_interval_h": settings.detail_sync_interval_h,
+            "profile_interval_d": settings.profile_interval_d, "tb_url": settings.tb_url}),))
 
     # -- 요청 로그 ------------------------------------------------------------
     def _log_request(self, category, latency_ms, status):

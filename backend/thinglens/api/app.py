@@ -2,10 +2,12 @@
 
 
 import json
+import os
 import statistics
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..auth import users
@@ -124,8 +126,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         st["queue"] = q.counts(conn)
         st["pending"] = q.pending_count(conn)
         st["cycles"] = [dict(r) for r in conn.execute("SELECT * FROM sync_cycle ORDER BY id DESC LIMIT 5")]
-        st["rate_max"] = settings.rate_max
-        st["rate_windows"] = settings.rate_windows
+        cfg = loads(st.pop("worker_config", None)) or {}   # 워커가 실제 적용 중인 설정
+        st["worker_config"] = cfg
+        st["rate_max"] = cfg.get("rate_max")
+        st["rate_windows"] = cfg.get("rate_windows", [])
         return st
 
     def _set_paused(conn, user, paused: bool):
@@ -171,8 +175,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             sql += " AND (e.name LIKE ? OR e.label LIKE ?)"
             args += [f"%{q_}%", f"%{q_}%"]
         total = conn.execute(sql.replace("SELECT e.*", "SELECT COUNT(*)"), args).fetchone()[0]
+        sql = sql.replace("SELECT e.*", "SELECT e.*, (SELECT COUNT(*) FROM ts_key k WHERE k.entity_id=e.id) AS key_count,"
+                          " (SELECT COUNT(*) FROM relation r WHERE r.from_id=e.id OR r.to_id=e.id) AS relation_count")
         rows = conn.execute(sql + " ORDER BY e.entity_type, e.name LIMIT ? OFFSET ?", [*args, limit, offset])
-        return {"total": total, "items": [_entity_out(r) for r in rows]}
+        return {"total": total, "items": [_entity_out(r) | {"key_count": r["key_count"],
+                                                            "relation_count": r["relation_count"]} for r in rows]}
+
+    @app.get("/api/entities-facets")
+    def entity_facets(conn: Db, user: User):
+        """필터용: 유형·프로파일별 엔티티 수 (범위 적용)."""
+        where, args = scope_sql(conn, user)
+        rows = conn.execute(f"SELECT e.entity_type, e.profile, COUNT(*) n FROM entity e WHERE e.deleted_ms IS NULL"
+                            f" AND {where} GROUP BY 1, 2 ORDER BY 1, 3 DESC", args)
+        return [dict(r) for r in rows]
 
     @app.get("/api/entities/{entity_id}")
     def entity_detail(entity_id: str, conn: Db, user: User):
@@ -217,10 +232,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if since_ms:
             sql += " AND c.ts_ms >= ?"
             args.append(since_ms)
-        rows = conn.execute(sql + " ORDER BY c.id DESC LIMIT ?", [*args, limit])
-        return [{**{k: r[k] for k in ("id", "cycle_id", "ts_ms", "entity_id", "entity_type", "entity_name",
-                                      "change_type", "field")},
-                 "before": loads(r["before_json"]), "after": loads(r["after_json"])} for r in rows]
+        rows = conn.execute(sql + " ORDER BY c.id DESC LIMIT ?", [*args, limit]).fetchall()
+        out = [{**{k: r[k] for k in ("id", "cycle_id", "ts_ms", "entity_id", "entity_type", "entity_name",
+                                     "change_type", "field")},
+                "before": loads(r["before_json"]), "after": loads(r["after_json"])} for r in rows]
+        # 관계 변경: 대상 엔티티 이름을 붙여 사람이 읽을 수 있게 (삭제된 엔티티 포함)
+        ids = {v["to_id"] for c in out for v in (c["before"], c["after"]) if isinstance(v, dict) and "to_id" in v}
+        if ids:
+            names = {r["id"]: r["name"] for r in conn.execute(
+                f"SELECT id, name FROM entity WHERE id IN ({','.join('?' * len(ids))})", list(ids))}
+            for c in out:
+                for v in (c["before"], c["after"]):
+                    if isinstance(v, dict) and "to_id" in v:
+                        v["to_name"] = names.get(v["to_id"])
+        return out
+
+    @app.get("/api/scheduler/metrics")
+    def scheduler_metrics(conn: Db, user: User, minutes: int = Query(60, ge=5, le=1440)):
+        """분 단위 TB 요청 수·지연·부하 오류 (스케줄러 화면 그래프용)."""
+        require(user, "ADMIN", "ANALYST")
+        end = now_ms() // 60_000 * 60_000 + 60_000
+        start = end - minutes * 60_000
+        buckets: dict[int, list] = {}
+        for r in conn.execute("SELECT ts_ms, latency_ms, status FROM tb_request_log WHERE ts_ms >= ?", (start,)):
+            buckets.setdefault((r["ts_ms"] - start) // 60_000, []).append(r)
+        out = []
+        for i in range(minutes):
+            rows = buckets.get(i, [])
+            lat = sorted(r["latency_ms"] for r in rows)
+            out.append({
+                "ts_ms": start + i * 60_000,
+                "requests": len(rows),
+                "p95_ms": round(lat[max(0, int(len(lat) * 0.95) - 1)]) if lat else None,
+                "load_errors": sum(1 for r in rows if r["status"] is None or r["status"] == 429
+                                   or r["status"] >= 500),
+            })
+        return out
+
+    @app.get("/api/customers")
+    def customers(conn: Db, user: User):
+        scope = users.customer_scope(conn, user)
+        rows = conn.execute("SELECT c.*, (SELECT COUNT(*) FROM entity e WHERE e.owner_id=c.id AND e.deleted_ms IS NULL)"
+                            " AS entities FROM customer c ORDER BY title").fetchall()
+        return [dict(r) for r in rows if scope is None or r["id"] in scope]
 
     @app.get("/api/catalog/tiers")
     def tiers(conn: Db, user: User):
@@ -231,7 +285,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f" WHERE e.deleted_ms IS NULL AND {where} GROUP BY 1", args)
         return {r["tier"]: r["n"] for r in rows}
 
+    _mount_web(app, settings)
     return app
+
+
+def _mount_web(app: FastAPI, settings: Settings) -> None:
+    """빌드된 웹 화면(frontend/dist)을 같은 서버에서 제공 — 사내망 단일 배포용. /api 외 경로는 index.html."""
+    web_dir = settings.web_dir
+    if not web_dir or not os.path.isfile(os.path.join(web_dir, "index.html")):
+        return
+    root = os.path.realpath(web_dir)
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def web(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404, "not found")
+        target = os.path.realpath(os.path.join(root, path))
+        if path and target.startswith(root + os.sep) and os.path.isfile(target):
+            return FileResponse(target)
+        return FileResponse(os.path.join(root, "index.html"))
 
 
 def _user_out(u) -> dict:

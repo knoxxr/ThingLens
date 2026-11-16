@@ -15,3 +15,7 @@ backend/data/
 *.db-shm
 .pytest_cache/
 *.egg-info/
+
+# frontend
+frontend/node_modules/
+frontend/dist/

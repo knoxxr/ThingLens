@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/format.ts","./src/main.tsx","./src/components/MinuteChart.tsx","./src/components/bits.tsx","./src/pages/Admin.tsx","./src/pages/Changes.tsx","./src/pages/Entities.tsx","./src/pages/EntityDetail.tsx","./src/pages/Login.tsx","./src/pages/Scheduler.tsx"],"version":"5.9.3"}
