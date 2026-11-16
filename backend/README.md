@@ -1,4 +1,4 @@
-# ThingLens 백엔드 (Phase 1–2)
+# ThingLens 백엔드 (Phase 1–3)
 
 ThingsBoard를 **저부하로 천천히** 읽어 로컬 DB(SQLite)에 메타데이터를 쌓고, REST API로 제공합니다.
 
@@ -45,6 +45,18 @@ ThingsBoard를 **저부하로 천천히** 읽어 로컬 DB(SQLite)에 메타데�
 실제 TB(CE 4.3.1 + Cassandra) 시드 데이터 결과: 키 31개 **데이터 종류 100%, 의미 자동 판정 100%** (LLM 없음),
 값 고정·드문 범위 이탈·데이터 없음 센서 모두 검출, 정상 센서 오탐 0, 엔티티 25개에 TB 요청 238건.
 
+## Phase 3 구현 범위 — 관계 구조 분석 + 엔티티 360°
+
+| 기능 | 내용 | 코드 |
+|---|---|---|
+| 관계 구조 분석 | 계층 관계(기본 `Contains`) 기준 트리, 경로, 하위 엔티티, 연결 묶음, 통계 — 저장된 데이터로만 계산 (TB 요청 없음) | `topology.py` |
+| 구조 이슈 8종 | 관계 없음·계층 밖·부모 여럿·순환(심각)·빈 에셋·과도한 깊이·소유 고객 불일치(하위 고객은 정상)·[PE] 그룹 불일치 | `topology.py` |
+| [PE] 엔티티 그룹 | 디바이스·에셋 그룹과 구성원 수집 ('All' 제외). CE면 첫 요청 404 후 즉시 건너뜀 | `tb/adapter.py`, `sync/handlers.py` |
+| **[A] 엔티티 360°** | 루트까지 경로, 형제(측정 의미·품질), 하위 요약(직속 자식·평균 품질·문제), 구조 이슈, 그룹, 템플릿 요약 문장, 형제 대비 빠진 측정 | `api/app.py` |
+
+모든 구조 분석은 사용자의 고객 범위 안 엔티티로만 그래프를 만들어 계산한다 (범위 밖으로 이어지는 관계는 보이지 않음).
+실제 TB 시드: 그래프 응답 8ms, 360° 응답 7ms (기준 2초), 누락 관계 시나리오(TS-X1·OLD-1) 검출.
+
 ### 변경 감지 지연 (저부하를 위한 절충)
 
 | 변경 종류 | 감지 시점 |
@@ -86,6 +98,8 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | `THINGLENS_SAMPLE_POINTS` | 60 | 창당 키별 원시값 수 |
 | `TB_CA_BUNDLE` / `TB_VERIFY_TLS` | - / true | 사내 인증서 |
 | `THINGLENS_WEB_DIR` | - | 빌드된 웹 화면 경로 (`frontend/dist`). 지정 시 `/` 에서 화면 제공 |
+| `THINGLENS_HIERARCHY_RELATIONS` | Contains | 계층으로 볼 관계 유형 (쉼표 구분) |
+| `THINGLENS_MAX_HIERARCHY_DEPTH` | 6 | 이보다 깊으면 '과도한 깊이' 참고 이슈 |
 
 수집 관련 설정은 **워커(`thinglens scheduler`) 프로세스의 환경변수**가 기준입니다. 워커가 실제 적용 중인 값을 DB에 기록하고, 화면은 그 값을 보여줍니다.
 
@@ -102,6 +116,9 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | GET | `/api/entities-facets` | 로그인(범위 적용) | 유형·프로파일별 엔티티 수 (필터용) |
 | GET | `/api/entities/{id}` | 로그인(범위 적용) | 관계(in/out)·속성·키(보고 주기·등급) |
 | GET | `/api/customers` | 로그인(범위 적용) | 고객 목록·소유 엔티티 수 |
+| GET | `/api/topology?rel_types=` | 로그인(범위 적용) | 관계 그래프(노드·간선), 구조 이슈, 통계 |
+| GET | `/api/topology/tree` | 로그인(범위 적용) | 계층 트리 + 계층 밖 엔티티 |
+| GET | `/api/entities/{id}/overview` | 로그인(범위 적용) | [A] 엔티티 360° |
 | GET | `/api/changes?entity_id=&change_type=&since_ms=` | 로그인(범위 적용) | 변경 이력 |
 | GET | `/api/catalog/tiers` | 로그인(범위 적용) | 키 보고 주기 등급 분포 |
 | GET | `/api/catalog/keys?status=&semantic=&q=` | 로그인(범위 적용) | (프로파일, 키)별 데이터 종류·의미·단위·신뢰도·근거·품질 — 검토 대기 먼저 |
@@ -118,7 +135,7 @@ API 문서(자동): `http://<서버>:8000/docs`
 ## 테스트
 
 ```bash
-.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (61개)
+.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (67개)
 THINGLENS_IT_TB_URL=http://localhost:8080 .venv/bin/pytest -m integration -s   # 실제 테스트 TB (deploy/test-env + 시드)
 ```
 

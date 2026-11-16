@@ -164,6 +164,16 @@ MIGRATIONS = [
     );
     ALTER TABLE entity ADD COLUMN quality_checked_ms INTEGER;
     """,
+    # v5 — Phase 3: [PE] 엔티티 그룹
+    """
+    CREATE TABLE entity_group (
+        id TEXT PRIMARY KEY, group_type TEXT NOT NULL, name TEXT, owner_id TEXT, last_seen_ms INTEGER
+    );
+    CREATE TABLE entity_group_member (
+        group_id TEXT NOT NULL, entity_id TEXT NOT NULL, PRIMARY KEY (group_id, entity_id)
+    );
+    CREATE INDEX entity_group_member_entity ON entity_group_member(entity_id);
+    """,
 ]
 
 

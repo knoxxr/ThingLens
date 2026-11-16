@@ -108,6 +108,37 @@ class TbAdapter:
                 return
             page += 1
 
+    # -- [PE] 엔티티 그룹 ---------------------------------------------------------
+    def entity_groups(self, group_type: str) -> list[dict] | None:
+        """PE 전용. CE 등 지원하지 않으면 None. 버전에 따라 목록/페이지 응답 둘 다 처리."""
+        out, page = [], 0
+        while True:
+            try:
+                data = self.client.get(f"/api/entityGroups/{group_type}", params={"pageSize": self.page_size, "page": page},
+                                       category="groups")
+            except TbError as e:
+                if e.status in (400, 403, 404, 405):
+                    return None
+                raise
+            rows = data if isinstance(data, list) else (data or {}).get("data", [])
+            for g in rows:
+                owner = (g.get("ownerId") or {})
+                out.append({"id": g["id"]["id"], "name": g.get("name"), "group_type": group_type,
+                            "owner_id": owner.get("id") if owner.get("entityType") == "CUSTOMER" else None})
+            if isinstance(data, list) or not data.get("hasNext"):
+                return out
+            page += 1
+
+    def group_members(self, group_id: str) -> list[str]:
+        ids, page = [], 0
+        while True:
+            data = self.client.get(f"/api/entityGroup/{group_id}/entities",
+                                   params={"pageSize": self.page_size, "page": page}, category="groups") or {}
+            ids += [r["id"]["id"] for r in data.get("data", []) if "id" in r]
+            if not data.get("hasNext"):
+                return ids
+            page += 1
+
     # -- 고객 -----------------------------------------------------------------
     def iter_customers(self) -> Iterator[dict]:
         page = 0

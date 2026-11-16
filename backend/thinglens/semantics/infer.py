@@ -276,6 +276,9 @@ def classify_attribute(key: str, scope: str, value, change_count: int = 0) -> di
     tokens = tokenize(key)
     ckey = compact(key)
     role, why = None, ""
+    if key in TB_DYNAMIC_ATTRIBUTES:  # TB가 자동 관리하는 접속·활동 상태 속성
+        return {"role": "status", "role_reason": "TB 기본 상태 속성", "dynamic": True,
+                "value_type": "number" if _to_num(value) is not None else ("boolean" if _is_bool(value) else "string")}
     for rid, rd in ATTRIBUTE_ROLES.items():
         aliases = [a.lower() for a in rd["aliases"]]
         if ckey in aliases or any(t in aliases for t in tokens):

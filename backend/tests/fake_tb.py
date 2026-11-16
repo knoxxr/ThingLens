@@ -28,6 +28,12 @@ class FakeTb:
         self.token_gen = 0
         self.now_ms = int(time.time() * 1000)
         self.agg_requests: list[tuple[str, int]] = []
+        self.groups: dict[str, dict] = {}     # [PE] id -> {type, name, members}
+
+    def add_group(self, gtype, name, members) -> str:
+        gid = uid()
+        self.groups[gid] = {"type": gtype, "name": name, "members": list(members)}
+        return gid
 
     def points(self, spec, start, end, limit):
         """spec: 주기(초) 또는 {"interval": 초, "gen": fn(ts)->값, "until": 마지막 ts}. 최신부터 limit개."""
@@ -97,6 +103,18 @@ class FakeTb:
         if path in info_paths:
             et = info_paths[path]
             return self._page([self._info(k, v) for k, v in self.entities.items() if v["type"] == et], qs)
+        if path.startswith("/api/entityGroups/"):
+            if self.edition != "PE":
+                return httpx.Response(404, json={"message": "no groups in CE"})
+            gt = path.rsplit("/", 1)[1]
+            items = [{"id": {"entityType": "ENTITY_GROUP", "id": k}, "name": g["name"], "type": gt}
+                     for k, g in self.groups.items() if g["type"] == gt]
+            return httpx.Response(200, json=items)  # PE 3.x 형식: 목록
+        if path.startswith("/api/entityGroup/") and path.endswith("/entities"):
+            g = self.groups.get(path.split("/")[3])
+            if g is None:
+                return httpx.Response(404, json={"message": "no group"})
+            return self._page([{"id": {"entityType": g["type"], "id": m}} for m in g["members"]], qs)
         if path == "/api/relations/info":
             rows = [{"from": {"entityType": f_t, "id": f}, "to": {"entityType": t_t, "id": t}, "type": rt,
                      "typeGroup": "COMMON"} for f, f_t, t, t_t, rt in self.relations if f == qs.get("fromId")]

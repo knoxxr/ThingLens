@@ -1,11 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { api, getToken, setToken, type User } from "./api";
 import { ROLE_LABEL } from "./format";
 import Admin from "./pages/Admin";
 import Catalog from "./pages/Catalog";
 import Quality from "./pages/Quality";
+// 그래프 라이브러리(cytoscape)가 커서 관계 구조 화면은 필요할 때만 불러온다
+const Topology = lazy(() => import("./pages/Topology"));
 import Changes from "./pages/Changes";
 import EntityDetail from "./pages/EntityDetail";
 import Entities from "./pages/Entities";
@@ -41,6 +43,7 @@ export default function App() {
         <div className="brand">Thing<span>Lens</span></div>
         {canOps && <NavLink to="/scheduler">수집 상태</NavLink>}
         <NavLink to="/entities">엔티티</NavLink>
+        <NavLink to="/topology">관계 구조</NavLink>
         <NavLink to="/catalog">데이터 카탈로그</NavLink>
         <NavLink to="/quality">데이터 품질</NavLink>
         <NavLink to="/changes">변경 이력</NavLink>
@@ -59,6 +62,7 @@ export default function App() {
           <Route path="/entities/:id" element={<EntityDetail />} />
           <Route path="/changes" element={<Changes />} />
           <Route path="/catalog" element={<Catalog user={user} />} />
+          <Route path="/topology" element={<Suspense fallback={<div className="empty">불러오는 중…</div>}><Topology /></Suspense>} />
           <Route path="/quality" element={<Quality />} />
           {user.role === "ADMIN" && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<div className="empty">페이지를 찾을 수 없습니다.</div>} />

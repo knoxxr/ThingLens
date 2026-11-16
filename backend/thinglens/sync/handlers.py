@@ -73,6 +73,7 @@ def start_cycle(ctx: Ctx, p: dict) -> None:
                        (now_ms(), int(full)))
     cid = cur.lastrowid
     q.enqueue(conn, "SYNC_CUSTOMERS", {"cycle_id": cid}, q.PRIO_ENTITY_LIST, f"customers:{cid}")
+    q.enqueue(conn, "SYNC_GROUPS", {"cycle_id": cid}, q.PRIO_ENTITY_DETAIL, f"groups:{cid}")
     for et in ENTITY_TYPES:
         q.enqueue(conn, "SYNC_ENTITY_LIST", {"cycle_id": cid, "entity_type": et, "full": full},
                   q.PRIO_ENTITY_LIST, f"list:{et}:{cid}")
@@ -121,6 +122,29 @@ def sync_customers(ctx: Ctx, p: dict) -> None:
             "INSERT INTO customer (id, title, parent_id, last_seen_ms) VALUES (?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET title=excluded.title, parent_id=excluded.parent_id,"
             " last_seen_ms=excluded.last_seen_ms", (c["id"], c["title"], c["parent_id"], t))
+
+
+def sync_groups(ctx: Ctx, p: dict) -> None:
+    """[PE] 디바이스·에셋 그룹과 구성원. CE면 그룹 API가 없어 바로 종료."""
+    conn, a = ctx.conn, ctx.adapter
+    t = now_ms()
+    for gt in ("DEVICE", "ASSET"):
+        groups = a.entity_groups(gt)
+        if groups is None:
+            return
+        members = {g["id"]: a.group_members(g["id"]) for g in groups if (g["name"] or "") != "All"}
+        with Tx(conn):
+            for g in groups:
+                conn.execute("INSERT INTO entity_group (id, group_type, name, owner_id, last_seen_ms) VALUES (?,?,?,?,?)"
+                             " ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_id=excluded.owner_id,"
+                             " last_seen_ms=excluded.last_seen_ms", (g["id"], gt, g["name"], g["owner_id"], t))
+            for gid, ids in members.items():
+                conn.execute("DELETE FROM entity_group_member WHERE group_id=?", (gid,))
+                conn.executemany("INSERT OR IGNORE INTO entity_group_member (group_id, entity_id) VALUES (?, ?)",
+                                 [(gid, i) for i in ids])
+            conn.execute("DELETE FROM entity_group_member WHERE group_id IN (SELECT id FROM entity_group"
+                         " WHERE group_type=? AND last_seen_ms < ?)", (gt, t))
+            conn.execute("DELETE FROM entity_group WHERE group_type=? AND last_seen_ms < ?", (gt, t))
 
 
 def sync_entity_list(ctx: Ctx, p: dict) -> None:
@@ -327,6 +351,7 @@ def analyze_all(ctx: Ctx, p: dict) -> None:
 HANDLERS = {
     "START_CYCLE": start_cycle,
     "SYNC_CUSTOMERS": sync_customers,
+    "SYNC_GROUPS": sync_groups,
     "SYNC_ENTITY_LIST": sync_entity_list,
     "SYNC_ENTITY_DETAIL": sync_entity_detail,
     "PROFILE_KEYS": profile_keys,

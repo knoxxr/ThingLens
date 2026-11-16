@@ -18,6 +18,7 @@ from ..scheduler import queue as q
 from ..semantics.dictionary import ATTRIBUTE_ROLES, SEMANTICS
 from ..semantics.infer import DATA_TYPE_KO
 from ..sync.analysis import analyze_entity
+from .. import topology as topo_mod
 
 
 class LoginReq(BaseModel):
@@ -461,6 +462,157 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [{k: r[k] for k in ("id", "entity_id", "entity_name", "profile", "key", "check_type", "severity",
                                    "message", "first_detected_ms", "last_detected_ms", "resolved_ms")}
                 | {"check_ko": CHECK_KO.get(r["check_type"]), "detail": loads(r["detail_json"])} for r in rows]
+
+    # -- 관계 구조 (Phase 3) -----------------------------------------------------
+    def load_topology(conn, user, rel_types: list[str] | None = None):
+        where, args = scope_sql(conn, user)
+        rows = conn.execute(
+            "SELECT e.id, e.entity_type, e.name, e.label, e.profile, e.owner_id, e.owner_name, s.score AS quality_score"
+            " FROM entity e LEFT JOIN quality_score s ON s.entity_id=e.id AND s.key=''"
+            f" WHERE e.deleted_ms IS NULL AND {where}", args).fetchall()
+        nodes = {r["id"]: dict(r) for r in rows}
+        edges = [(r["from_id"], r["to_id"], r["rel_type"]) for r in conn.execute(
+            "SELECT from_id, to_id, rel_type FROM relation") if r["from_id"] in nodes and r["to_id"] in nodes]
+        t = topo_mod.Topology(nodes, edges, set(rel_types or settings.hierarchy_relations))
+        cparent = {r["id"]: r["parent_id"] for r in conn.execute("SELECT id, parent_id FROM customer")}
+        groups: dict[str, set[str]] = {}
+        for r in conn.execute("SELECT m.entity_id, g.name FROM entity_group_member m JOIN entity_group g ON g.id=m.group_id"):
+            if r["entity_id"] in nodes:
+                groups.setdefault(r["entity_id"], set()).add(r["name"])
+        issues = topo_mod.analyze(t, customer_parent=cparent, groups_of=groups, max_depth=settings.max_hierarchy_depth)
+        return t, issues, groups
+
+    def _issue_out(t, i):
+        return {"type": i.type, "type_ko": topo_mod.ISSUE_KO[i.type], "severity": i.severity,
+                "entity_id": i.entity_id, "entity_name": t.nodes[i.entity_id]["name"],
+                "entity_type": t.nodes[i.entity_id]["entity_type"], "profile": t.nodes[i.entity_id]["profile"],
+                "message": i.message,
+                "related": [{"id": r, "name": t.nodes[r]["name"]} for r in i.related if r in t.nodes]}
+
+    @app.get("/api/topology")
+    def topology(conn: Db, user: User, rel_types: str | None = None):
+        """관계 그래프 + 구조 이슈 + 통계 (권한 범위 안의 엔티티만)."""
+        rts = [r for r in (rel_types or "").split(",") if r] or None
+        t, issues, groups = load_topology(conn, user, rts)
+        open_f = {r["entity_id"]: r["n"] for r in conn.execute(
+            "SELECT entity_id, COUNT(*) n FROM quality_finding WHERE resolved_ms IS NULL AND severity='critical'"
+            " GROUP BY entity_id")}
+        issue_count: dict[str, int] = {}
+        for i in issues:
+            issue_count[i.entity_id] = issue_count.get(i.entity_id, 0) + 1
+        st = topo_mod.stats(t)
+        return {
+            "hierarchy_relations": sorted(t.hierarchy_types),
+            "nodes": [{**{k: n[k] for k in ("id", "entity_type", "name", "profile", "owner_name", "quality_score")},
+                       "topology_issues": issue_count.get(n["id"], 0), "critical_findings": open_f.get(n["id"], 0),
+                       "groups": sorted(groups.get(n["id"], []))} for n in t.nodes.values()],
+            "edges": [{"from": f, "to": to, "type": rt, "hierarchy": rt in t.hierarchy_types} for f, to, rt in t.edges],
+            "roots": t.roots,
+            "issues": sorted((_issue_out(t, i) for i in issues),
+                             key=lambda x: ({"critical": 0, "warning": 1, "info": 2}[x["severity"]], x["type"], x["entity_name"] or "")),
+            "stats": {**st, "entities": dict(st["entities"]), "profiles": dict(st["profiles"]),
+                      "relation_types": dict(st["relation_types"])},
+        }
+
+    @app.get("/api/topology/tree")
+    def topology_tree(conn: Db, user: User):
+        """계층 트리 (루트 에셋 → 자식). 계층 밖 엔티티는 별도 목록."""
+        t, _, _ = load_topology(conn, user)
+
+        def node(nid, seen):
+            n = t.nodes[nid]
+            kids = [] if nid in seen else sorted(set(t.children.get(nid, [])), key=lambda c: (
+                t.nodes[c]["entity_type"] != "ASSET", t.nodes[c]["name"] or ""))
+            return {"id": nid, "name": n["name"], "entity_type": n["entity_type"], "profile": n["profile"],
+                    "quality_score": n["quality_score"],
+                    "children": [node(c, seen | {nid}) for c in kids if c not in seen]}
+        in_tree = set(t.roots) | {d for r in t.roots for d in t.descendants(r)}
+        outside = [n for n in t.nodes.values() if n["id"] not in in_tree]
+        return {"roots": [node(r, set()) for r in t.roots],
+                "outside": sorted(({"id": n["id"], "name": n["name"], "entity_type": n["entity_type"],
+                                    "profile": n["profile"]} for n in outside), key=lambda n: n["name"] or "")}
+
+    @app.get("/api/entities/{entity_id}/overview")
+    def entity_overview(entity_id: str, conn: Db, user: User):
+        """[A] 엔티티 360° — 위치(경로), 형제, 하위 요약, 구조 이슈, 품질 요약, 요약 문장(템플릿)."""
+        t, issues, groups = load_topology(conn, user)
+        if entity_id not in t.nodes:
+            raise HTTPException(404, "엔티티를 찾을 수 없습니다")
+        e = t.nodes[entity_id]
+        path = [{"id": p, "name": t.nodes[p]["name"], "entity_type": t.nodes[p]["entity_type"]}
+                for p in t.path_to_root(entity_id)]
+        parents = sorted(set(t.parents.get(entity_id, [])))
+        siblings = sorted({c for p in parents for c in t.children.get(p, []) if c != entity_id},
+                          key=lambda c: t.nodes[c]["name"] or "")
+        desc = t.descendants(entity_id)
+        my_issues = [_issue_out(t, i) for i in issues if i.entity_id == entity_id]
+        sub_issues = [_issue_out(t, i) for i in issues if i.entity_id in desc]
+
+        def findings_of(ids):
+            if not ids:
+                return []
+            marks = ",".join("?" * len(ids))
+            return conn.execute(f"SELECT entity_id, key, check_type, severity, message FROM quality_finding"
+                                f" WHERE resolved_ms IS NULL AND entity_id IN ({marks})", list(ids)).fetchall()
+        my_findings = findings_of([entity_id])
+        sub_findings = findings_of(list(desc))
+        sub_scores = [t.nodes[d]["quality_score"] for d in desc if t.nodes[d]["quality_score"] is not None]
+        sem_rows = conn.execute("SELECT entity_id, semantic FROM key_analysis WHERE source='TS'"
+                                " AND status IN ('AUTO','CONFIRMED') AND semantic != 'unknown'").fetchall()
+        sems: dict[str, set[str]] = {}
+        for r in sem_rows:
+            sems.setdefault(r["entity_id"], set()).add(r["semantic"])
+        my_sems = sems.get(entity_id, set())
+        # 형제 대부분(60%↑)이 가진 의미인데 나에게 없는 것 → 측정 공백 후보 (Phase 5 [F] 의 예고)
+        same_type_sibs = [s for s in siblings if t.nodes[s]["entity_type"] == e["entity_type"]]
+        sib_sem_count: dict[str, int] = {}
+        for s in same_type_sibs:
+            for sm in sems.get(s, set()):
+                sib_sem_count[sm] = sib_sem_count.get(sm, 0) + 1
+        missing = sorted(sm for sm, n in sib_sem_count.items()
+                         if len(same_type_sibs) >= 2 and n >= 0.6 * len(same_type_sibs) and sm not in my_sems)
+
+        summary = []
+        kind = "디바이스" if e["entity_type"] == "DEVICE" else "에셋"
+        if path:
+            summary.append(f"{' › '.join(p['name'] for p in path)} 아래의 {e['profile'] or ''} {kind}입니다.")
+        elif t.children.get(entity_id):
+            summary.append(f"최상위 {kind}입니다. 하위 엔티티 {len(desc)}개.")
+        else:
+            summary.append(f"어떤 계층에도 속하지 않은 {kind}입니다.")
+        if e["quality_score"] is not None:
+            crit = [f for f in my_findings if f["severity"] == "critical"]
+            summary.append(f"품질 {e['quality_score']}점" + (f" — {', '.join(sorted({f['message'] for f in crit}))}" if crit else "."))
+        if sub_scores:
+            summary.append(f"하위 엔티티 평균 품질 {round(sum(sub_scores) / len(sub_scores))}점, "
+                           f"미해결 품질 문제 {len(sub_findings)}건.")
+        for i in my_issues:
+            summary.append(f"구조: {i['type_ko']} — {i['message']}")
+        if missing:
+            ko = {k: v["ko"] for k, v in SEMANTICS.items()}
+            summary.append(f"형제 대부분이 측정하는 {', '.join(ko.get(m, m) for m in missing)} 가(이) 이 엔티티에는 없습니다.")
+        children_profiles: dict[str, int] = {}
+        for d in t.children.get(entity_id, []):
+            k = f"{t.nodes[d]['entity_type']}:{t.nodes[d]['profile'] or '(없음)'}"
+            children_profiles[k] = children_profiles.get(k, 0) + 1
+        return {
+            "id": entity_id, "summary": summary, "path": path,
+            "parents": [{"id": p, "name": t.nodes[p]["name"]} for p in parents],
+            "siblings": [{"id": s, "name": t.nodes[s]["name"], "entity_type": t.nodes[s]["entity_type"],
+                          "profile": t.nodes[s]["profile"], "quality_score": t.nodes[s]["quality_score"],
+                          "semantics": sorted(sems.get(s, set()))} for s in siblings],
+            "children_by_profile": children_profiles,
+            "descendants": len(desc),
+            "subtree_quality": {"avg": round(sum(sub_scores) / len(sub_scores)) if sub_scores else None,
+                                "critical": sum(1 for f in sub_findings if f["severity"] == "critical"),
+                                "warning": sum(1 for f in sub_findings if f["severity"] == "warning")},
+            "subtree_issues": sub_issues[:50],
+            "issues": my_issues,
+            "groups": sorted(groups.get(entity_id, [])),
+            "semantics": sorted(my_sems),
+            "missing_vs_siblings": missing,
+            "correlation": None,  # Phase 5 에서 '상관 높은 엔티티 Top 10' 제공
+        }
 
     @app.get("/api/catalog/tiers")
     def tiers(conn: Db, user: User):

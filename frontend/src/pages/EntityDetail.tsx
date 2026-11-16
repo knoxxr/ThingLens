@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { api, type CatalogMeta, type Change, type EntityDetail as Detail } from "../api";
+import { api, type CatalogMeta, type Change, type EntityDetail as Detail, type Overview } from "../api";
 import { ChangeLabel, Confidence, ErrorBox, Loading, ScoreBadge, SemStatusBadge, SeverityLabel, TierBadge } from "../components/bits";
 import { fmtAgo, fmtChangeValue, fmtInterval, fmtTime, short } from "../format";
 
@@ -10,6 +10,7 @@ export default function EntityDetail() {
   const { id } = useParams();
   const d = useQuery({ queryKey: ["entity", id], queryFn: () => api<Detail>(`/api/entities/${id}`) });
   const ch = useQuery({ queryKey: ["changes", id], queryFn: () => api<Change[]>(`/api/changes?entity_id=${id}&limit=50`) });
+  const ov = useQuery({ queryKey: ["overview", id], queryFn: () => api<Overview>(`/api/entities/${id}/overview`) });
   const meta = useQuery({ queryKey: ["catalog-meta"], queryFn: () => api<CatalogMeta>("/api/catalog/meta"), staleTime: Infinity });
   const semKo = (s: string | null) => !s ? "-" : s === "unknown" ? "모름" : meta.data?.semantics[s]?.ko ?? s;
   if (d.isLoading) return <Loading />;
@@ -21,11 +22,56 @@ export default function EntityDetail() {
     <>
       <div className="page-head">
         <div>
-          <div className="sub"><Link to="/entities">엔티티</Link> /</div>
+          <div className="crumbs">
+            <Link to="/entities">엔티티</Link>
+            {ov.data?.path.map((p) => <Link key={p.id} to={`/entities/${p.id}`}>{p.name}</Link>)}
+          </div>
           <h1>{e.name}</h1>
           <div className="sub">{e.entity_type === "DEVICE" ? "디바이스" : "에셋"} · {e.profile ?? "프로파일 없음"}{e.label ? ` · ${e.label}` : ""}</div>
         </div>
+        <Link className="btn" to={`/topology?focus=${e.id}`}>그래프에서 보기</Link>
       </div>
+
+      {ov.data && (
+        <div className="grid two" style={{ marginBottom: 14 }}>
+          <div className="card">
+            <h2>360° 요약</h2>
+            <ul className="summary">{ov.data.summary.map((s, i) => <li key={i}>{s}</li>)}</ul>
+            {ov.data.issues.length > 0 && <div style={{ marginTop: 8 }}>{ov.data.issues.map((i, k) => <div key={k}><SeverityLabel s={i.severity} /> {i.type_ko}</div>)}</div>}
+            {ov.data.groups.length > 0 && <div className="sub" style={{ marginTop: 8 }}>엔티티 그룹: {ov.data.groups.join(", ")}</div>}
+            <div className="sub" style={{ marginTop: 8 }}>상관이 높은 엔티티 Top 10 은 상관 분석 단계(Phase 5)에서 추가됩니다.</div>
+          </div>
+          {e.entity_type === "ASSET" && ov.data.descendants > 0 ? (
+            <div className="card">
+              <h2>하위 요약 <span className="sub">· 하위 엔티티 {ov.data.descendants}개</span></h2>
+              <dl className="kv">
+                <dt>직속 자식</dt><dd>{Object.entries(ov.data.children_by_profile).map(([k, n]) => `${k.split(":")[1]} ${n}`).join(", ")}</dd>
+                <dt>평균 품질</dt><dd><ScoreBadge score={ov.data.subtree_quality.avg} /></dd>
+                <dt>품질 문제</dt><dd>심각 {ov.data.subtree_quality.critical} · 주의 {ov.data.subtree_quality.warning}</dd>
+                <dt>구조 이슈</dt><dd>{ov.data.subtree_issues.length}건</dd>
+              </dl>
+              {ov.data.subtree_issues.length > 0 && <ul className="summary" style={{ marginTop: 8 }}>{ov.data.subtree_issues.slice(0, 6).map((i, k) => <li key={k}><SeverityLabel s={i.severity} /> <Link to={`/entities/${i.entity_id}`}>{i.entity_name}</Link> — {i.type_ko}</li>)}</ul>}
+            </div>
+          ) : (
+            <div className="card" style={{ padding: 0 }}>
+              <h2 style={{ padding: "16px 18px 0" }}>형제 엔티티 ({ov.data.siblings.length})</h2>
+              {ov.data.missing_vs_siblings.length > 0 && <div className="banner warning" style={{ margin: "0 18px 10px" }}>형제 대부분이 측정하는 <b>{ov.data.missing_vs_siblings.map(semKo).join(", ")}</b> 이(가) 이 엔티티에는 없습니다.</div>}
+              <div className="table-wrap" style={{ maxHeight: 260 }}>
+                <table>
+                  <thead><tr><th>이름</th><th>프로파일</th><th>측정 의미</th><th className="num">품질</th></tr></thead>
+                  <tbody>
+                    {ov.data.siblings.map((s) => (
+                      <tr key={s.id}><td><Link to={`/entities/${s.id}`}>{s.name}</Link></td><td>{s.profile ?? "-"}</td>
+                        <td className="sub">{s.semantics.map(semKo).join(", ") || "-"}</td><td className="num"><ScoreBadge score={s.quality_score} /></td></tr>
+                    ))}
+                    {!ov.data.siblings.length && <tr><td colSpan={4} className="empty">형제 엔티티 없음</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid two" style={{ marginBottom: 14 }}>
         <div className="card">

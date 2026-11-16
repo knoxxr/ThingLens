@@ -116,3 +116,21 @@ export interface Change {
 }
 export interface Customer { id: string; title: string; parent_id: string | null; entities: number }
 export interface AuditRow { id: number; ts_ms: number; login: string | null; action: string; target: string | null; detail: unknown }
+
+// -- Phase 3: 관계 구조 -------------------------------------------------------
+export interface TopoNode { id: string; entity_type: "DEVICE" | "ASSET"; name: string; profile: string | null; owner_name: string | null; quality_score: number | null; topology_issues: number; critical_findings: number; groups: string[] }
+export interface TopoIssue { type: string; type_ko: string; severity: Severity; entity_id: string; entity_name: string; entity_type: string; profile: string | null; message: string; related: { id: string; name: string }[] }
+export interface TopologyResp {
+  hierarchy_relations: string[]; nodes: TopoNode[]; edges: { from: string; to: string; type: string; hierarchy: boolean }[];
+  roots: string[]; issues: TopoIssue[];
+  stats: { entities: Record<string, number>; profiles: Record<string, number>; relation_types: Record<string, number>; edges: number; roots: number; components: number; max_depth: number; devices_per_asset: { min: number; max: number; avg: number } };
+}
+export interface TreeNode { id: string; name: string; entity_type: string; profile: string | null; quality_score: number | null; children: TreeNode[] }
+export interface TreeResp { roots: TreeNode[]; outside: { id: string; name: string; entity_type: string; profile: string | null }[] }
+export interface Overview {
+  id: string; summary: string[]; path: { id: string; name: string; entity_type: string }[]; parents: { id: string; name: string }[];
+  siblings: { id: string; name: string; entity_type: string; profile: string | null; quality_score: number | null; semantics: string[] }[];
+  children_by_profile: Record<string, number>; descendants: number;
+  subtree_quality: { avg: number | null; critical: number; warning: number }; subtree_issues: TopoIssue[]; issues: TopoIssue[];
+  groups: string[]; semantics: string[]; missing_vs_siblings: string[]; correlation: null;
+}

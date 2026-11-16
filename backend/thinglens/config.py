@@ -53,6 +53,10 @@ class Settings:
     quality_interval_h: float = 24.0      # 품질 점검(최근 샘플 + 24시간 범위) 주기
     request_log_retention_d: float = 7.0
 
+    # 관계 구조 분석 (Phase 3)
+    hierarchy_relations: list = field(default_factory=lambda: ["Contains"])
+    max_hierarchy_depth: int = 6
+
     # 앱 로그인
     session_ttl_h: float = 12.0
 
@@ -83,4 +87,8 @@ class Settings:
         s.quality_interval_h = _env("THINGLENS_QUALITY_INTERVAL_H", s.quality_interval_h, float)
         s.session_ttl_h = _env("THINGLENS_SESSION_TTL_H", s.session_ttl_h, float)
         s.web_dir = _env("THINGLENS_WEB_DIR", s.web_dir)
+        rels = _env("THINGLENS_HIERARCHY_RELATIONS")
+        if rels:
+            s.hierarchy_relations = [r.strip() for r in rels.split(",") if r.strip()]
+        s.max_hierarchy_depth = _env("THINGLENS_MAX_HIERARCHY_DEPTH", s.max_hierarchy_depth, int)
         return s
