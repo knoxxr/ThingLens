@@ -68,12 +68,46 @@ export interface Entity {
   owner_id: string | null; owner_name: string | null; active: boolean | null; created_time: number | null;
   first_seen_ms: number; last_seen_ms: number; detail_synced_ms: number | null; profile_synced_ms: number | null;
 }
-export interface TsKey { key: string; first_seen_ms: number; interval_s: number | null; irregular: number | null; tier: Tier | null; last_ts: number | null; value_kind: string | null; profiled_ms: number | null }
+export interface KeyFinding { check: string; check_ko: string; severity: Severity; message: string }
+export type Severity = "critical" | "warning" | "info";
+export type SemStatus = "AUTO" | "REVIEW" | "CONFIRMED";
+export interface TsKey {
+  key: string; first_seen_ms: number; interval_s: number | null; irregular: number | null; tier: Tier | null;
+  last_ts: number | null; profiled_ms: number | null;
+  data_type: string | null; semantic: string | null; unit: string | null; unit_source: string | null;
+  confidence: number | null; semantic_status: SemStatus | null; evidence: string[];
+  quality_score: number | null; findings: KeyFinding[];
+}
 export interface EntityDetail extends Entity {
   relations_out: { type: string; to_id: string; to_name: string; to_type: string }[];
   relations_in: { type: string; from_id: string; from_name: string; from_type: string }[];
   attributes: { scope: string; key: string; value: unknown; last_update_ts: number | null }[];
   timeseries_keys: TsKey[];
+  attribute_roles: Record<string, { role: string; dynamic: boolean }>;
+  quality_score: number | null;
+}
+export interface CatalogMeta {
+  semantics: Record<string, { ko: string; default_unit: string | null }>;
+  roles: Record<string, string>; data_types: Record<string, string>; checks: Record<string, string>;
+}
+export interface CatalogKey {
+  profile: string | null; key: string; entities: number; status: SemStatus; semantic: string; semantic_split: boolean;
+  unit: string | null; unit_source: string | null; data_type: string | null; confidence: number;
+  evidence: string[]; alternatives: { semantic: string; score: number }[]; tiers: Record<string, number>;
+  interval_s: number | null; quality_avg: number | null;
+}
+export interface SemanticGroup { semantic: string; ko: string; entities: number; units: string[]; keys: { key: string; entities: number; unit: string | null }[] }
+export interface AttrCatalog { scope: string; key: string; role: string; entities: number; dynamic: boolean }
+export interface Rule { id: number; profile: string | null; key: string; semantic: string; unit: string | null; created_by: string; created_ms: number }
+export interface QualitySummary {
+  entities_scored: number; average: number | null; buckets: Record<string, number>;
+  open_by_check: { check: string; check_ko: string; severity: Severity; count: number }[];
+  worst: { id: string; name: string; entity_type: string; profile: string | null; score: number }[];
+}
+export interface QualityFindingRow {
+  id: number; entity_id: string; entity_name: string; profile: string | null; key: string; check_type: string;
+  check_ko: string; severity: Severity; message: string; first_detected_ms: number; last_detected_ms: number;
+  resolved_ms: number | null; detail: unknown;
 }
 export type Tier = "high" | "mid" | "low" | "inactive";
 export interface Change {

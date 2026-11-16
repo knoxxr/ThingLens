@@ -44,12 +44,13 @@ class Settings:
     rate_default_factor: float = 0.5
     page_size: int = 100
     max_points_per_request: int = 50_000
-    sample_points: int = 20
+    sample_points: int = 60
 
     # 주기
     meta_sync_interval_h: float = 6.0     # 엔티티 목록 동기화 주기
     detail_sync_interval_h: float = 24.0  # 엔티티 상세(관계·속성·키) 재확인 주기
-    profile_interval_d: float = 7.0       # 키 보고 주기 재측정 주기
+    profile_interval_d: float = 7.0       # 키 분석(샘플 3개 창 + 7일 범위) 재수행 주기
+    quality_interval_h: float = 24.0      # 품질 점검(최근 샘플 + 24시간 범위) 주기
     request_log_retention_d: float = 7.0
 
     # 앱 로그인
@@ -79,6 +80,7 @@ class Settings:
         s.meta_sync_interval_h = _env("THINGLENS_META_SYNC_INTERVAL_H", s.meta_sync_interval_h, float)
         s.detail_sync_interval_h = _env("THINGLENS_DETAIL_SYNC_INTERVAL_H", s.detail_sync_interval_h, float)
         s.profile_interval_d = _env("THINGLENS_PROFILE_INTERVAL_D", s.profile_interval_d, float)
+        s.quality_interval_h = _env("THINGLENS_QUALITY_INTERVAL_H", s.quality_interval_h, float)
         s.session_ttl_h = _env("THINGLENS_SESSION_TTL_H", s.session_ttl_h, float)
         s.web_dir = _env("THINGLENS_WEB_DIR", s.web_dir)
         return s

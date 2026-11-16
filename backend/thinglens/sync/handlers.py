@@ -24,8 +24,9 @@ from dataclasses import dataclass
 from ..config import Settings
 from ..db import Tx, dumps, now_ms
 from ..scheduler import queue as q
-from ..scheduler.planner import classify_tier, estimate_interval
+from ..scheduler.planner import estimate_interval
 from ..tb.adapter import DAY_MS, EntityRec, TbAdapter
+from . import analysis as an
 from ..tb.client import TbError
 
 ENTITY_TYPES = ("DEVICE", "ASSET")
@@ -100,6 +101,10 @@ def finish_cycle(ctx: Ctx, p: dict) -> str | None:
                 conn.execute("DELETE FROM relation WHERE from_id=? OR to_id=?", (e["id"], e["id"]))
                 if baseline:
                     record_change(conn, cid, e["id"], e["entity_type"], "ENTITY_REMOVED", before={"name": e["name"]})
+        due = now_ms() - int(ctx.settings.quality_interval_h * 3_600_000)
+        for r in conn.execute("SELECT e.id FROM entity e WHERE e.deleted_ms IS NULL AND e.profile_synced_ms IS NOT NULL"
+                              " AND (e.quality_checked_ms IS NULL OR e.quality_checked_ms < ?)", (due,)).fetchall():
+            q.enqueue(conn, "QUALITY_CHECK", {"entity_id": r["id"]}, q.PRIO_QUALITY, f"quality:{r['id']}")
         n_changes = conn.execute("SELECT COUNT(*) FROM metadata_change WHERE cycle_id=?", (cid,)).fetchone()[0]
         conn.execute("UPDATE sync_cycle SET status=?, finished_ms=?, changes=? WHERE id=?",
                      (status, now_ms(), n_changes, cid))
@@ -195,6 +200,7 @@ def sync_entity_detail(ctx: Ctx, p: dict) -> None:
     stale_ms = now_ms() - int(ctx.settings.profile_interval_d * DAY_MS)
     if keys and (keys_added or ent["profile_synced_ms"] is None or ent["profile_synced_ms"] < stale_ms):
         q.enqueue(conn, "PROFILE_KEYS", {"entity_id": eid}, q.PRIO_PROFILE, f"profile:{eid}")
+    an.analyze_entity(conn, eid)  # 속성 역할 갱신 (로컬 계산)
 
 
 def _diff_relations(conn, cid, ent, rels, track):
@@ -272,72 +278,50 @@ def _diff_ts_keys(conn, cid, ent, keys, track) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# 키 보고 주기 측정 (계획서 §3.5 ①)
+# 키 분석 (주 1회·키 변경 시) / 품질 점검 (매일) — 계획서 §3.5, §5.0, §13 [B]
 # --------------------------------------------------------------------------- #
 def profile_keys(ctx: Ctx, p: dict) -> None:
+    """최근·1일 전·7일 전 샘플 + 7일 범위(MIN/MAX/COUNT, 구간 1개) → 보고 주기·종류·의미·품질."""
     conn, a, s = ctx.conn, ctx.adapter, ctx.settings
     ent = conn.execute("SELECT * FROM entity WHERE id=?", (p["entity_id"],)).fetchone()
     if ent is None or ent["deleted_ms"] is not None:
         return
     keys = [r["key"] for r in conn.execute("SELECT key FROM ts_key WHERE entity_id=? ORDER BY key", (ent["id"],))]
-    results: dict[str, dict] = {}
-    pending = keys
-    for lookback_days in (1, 30):  # Cassandra 파티션 스캔을 줄이려 짧은 구간부터
-        if not pending:
-            break
-        short = []
-        for i in range(0, len(pending), 20):
-            batch = pending[i:i + 20]
-            end = now_ms()
-            data = a.ts_raw(ent["entity_type"], ent["id"], batch, end - lookback_days * DAY_MS, end, s.sample_points)
-            for k in batch:
-                pts = data.get(k) or []
-                info = estimate_interval([pt["ts"] for pt in pts if "ts" in pt])
-                results[k] = {"info": info, "points": len(pts),
-                              "last_ts": max((pt["ts"] for pt in pts if "ts" in pt), default=None),
-                              "value_kind": _value_kind(pts)}
-                if info is None:
-                    short.append(k)
-        pending = short
+    if not keys:
+        return
+    latest = an.fetch_latest(a, ent, keys, s.sample_points)
+    intervals = {k: (estimate_interval([t for t, _ in pts]) or {}).get("interval_s") for k, pts in latest.items()}
+    older = an.fetch_older_windows(a, ent, {k: iv for k, iv in intervals.items() if iv}, s.sample_points)
+    numeric = an._numeric_keys(latest)
+    env = an.fetch_envelopes(a, ent, {k: intervals[k] for k in numeric if intervals[k]}, 7 * DAY_MS)
+    an.save_profile_and_samples(conn, ent, latest, older, env, "profile")
     t = now_ms()
-    with Tx(conn):
-        for k, r in results.items():
-            info = r["info"]
-            conn.execute(
-                "INSERT INTO key_profile (entity_id, key, interval_s, irregular, tier, points, last_ts, value_kind,"
-                " profiled_ms) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id, key) DO UPDATE SET"
-                " interval_s=excluded.interval_s, irregular=excluded.irregular, tier=excluded.tier,"
-                " points=excluded.points, last_ts=excluded.last_ts, value_kind=excluded.value_kind,"
-                " profiled_ms=excluded.profiled_ms",
-                (ent["id"], k, info["interval_s"] if info else None, int(info["irregular"]) if info else None,
-                 classify_tier(info), r["points"], r["last_ts"], r["value_kind"], t))
-        conn.execute("UPDATE entity SET profile_synced_ms=? WHERE id=?", (t, ent["id"]))
+    conn.execute("UPDATE entity SET profile_synced_ms=?, quality_checked_ms=? WHERE id=?", (t, t, ent["id"]))
+    an.analyze_entity(conn, ent["id"])
 
 
-def _value_kind(points) -> str | None:
-    kinds: dict[str, int] = {}
-    for pt in points:
-        v = pt.get("value")
-        if isinstance(v, bool):
-            k = "boolean"
-        elif isinstance(v, (int, float)):
-            k = "number"
-        elif isinstance(v, str):
-            sv = v.strip()
-            if sv.lower() in ("true", "false"):
-                k = "boolean"
-            elif sv[:1] in ("{", "["):
-                k = "json"
-            else:
-                try:
-                    float(sv)
-                    k = "number"
-                except ValueError:
-                    k = "string"
-        else:
-            continue
-        kinds[k] = kinds.get(k, 0) + 1
-    return max(kinds, key=kinds.get) if kinds else None
+def quality_check(ctx: Ctx, p: dict) -> None:
+    """최근 샘플 + 24시간 범위만 새로 받아 품질 재점검."""
+    conn, a, s = ctx.conn, ctx.adapter, ctx.settings
+    ent = conn.execute("SELECT * FROM entity WHERE id=?", (p["entity_id"],)).fetchone()
+    if ent is None or ent["deleted_ms"] is not None:
+        return
+    prof = {r["key"]: r["interval_s"] for r in conn.execute(
+        "SELECT k.key, p.interval_s FROM ts_key k LEFT JOIN key_profile p ON p.entity_id=k.entity_id AND p.key=k.key"
+        " WHERE k.entity_id=?", (ent["id"],))}
+    if not prof:
+        return
+    latest = an.fetch_latest(a, ent, list(prof), s.sample_points)
+    numeric = an._numeric_keys(latest)
+    env = an.fetch_envelopes(a, ent, {k: prof[k] for k in numeric if prof.get(k)}, DAY_MS)
+    an.save_profile_and_samples(conn, ent, latest, None, env, "daily")
+    conn.execute("UPDATE entity SET quality_checked_ms=? WHERE id=?", (now_ms(), ent["id"]))
+    an.analyze_entity(conn, ent["id"])
+
+
+def analyze_all(ctx: Ctx, p: dict) -> None:
+    """TB 요청 없이 전체 재분석 (사용자가 의미를 확정했을 때 등)."""
+    an.analyze_all(ctx.conn)
 
 
 HANDLERS = {
@@ -346,5 +330,7 @@ HANDLERS = {
     "SYNC_ENTITY_LIST": sync_entity_list,
     "SYNC_ENTITY_DETAIL": sync_entity_detail,
     "PROFILE_KEYS": profile_keys,
+    "QUALITY_CHECK": quality_check,
+    "ANALYZE_ALL": analyze_all,
     "FINISH_CYCLE": finish_cycle,
 }

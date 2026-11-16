@@ -120,6 +120,50 @@ MIGRATIONS = [
     """
     ALTER TABLE scheduler_state ADD COLUMN worker_config TEXT;
     """,
+    # v4 — Phase 2: 샘플·범위·의미 추론·사용자 확정·품질
+    """
+    CREATE TABLE key_sample (
+        entity_id TEXT NOT NULL, key TEXT NOT NULL,
+        sampled_ms INTEGER NOT NULL,
+        windows_json TEXT NOT NULL,          -- [[[ts, value], ...] 최근 창, 1일 전 창, 7일 전 창]
+        PRIMARY KEY (entity_id, key)
+    );
+    CREATE TABLE key_envelope (
+        entity_id TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,   -- profile(7일) | daily(24시간)
+        start_ts INTEGER, end_ts INTEGER, min REAL, max REAL, count INTEGER, computed_ms INTEGER,
+        PRIMARY KEY (entity_id, key, kind)
+    );
+    CREATE TABLE key_analysis (
+        entity_id TEXT NOT NULL, source TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', key TEXT NOT NULL,
+        data_type TEXT, stats_json TEXT,
+        semantic TEXT, unit TEXT, unit_source TEXT, confidence REAL, status TEXT,
+        evidence_json TEXT, alternatives_json TEXT,
+        role TEXT, dynamic INTEGER,                         -- 속성 전용
+        analyzed_ms INTEGER,
+        PRIMARY KEY (entity_id, source, scope, key)
+    );
+    CREATE INDEX key_analysis_semantic ON key_analysis(semantic);
+    CREATE TABLE semantic_rule (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile TEXT,                                       -- NULL = 모든 프로파일의 같은 키 이름
+        key TEXT NOT NULL, semantic TEXT NOT NULL, unit TEXT,
+        created_by TEXT, created_ms INTEGER NOT NULL,
+        UNIQUE (profile, key)
+    );
+    CREATE TABLE quality_finding (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id TEXT NOT NULL, key TEXT NOT NULL, check_type TEXT NOT NULL,
+        severity TEXT NOT NULL, message TEXT, detail_json TEXT,
+        first_detected_ms INTEGER NOT NULL, last_detected_ms INTEGER NOT NULL, resolved_ms INTEGER
+    );
+    CREATE INDEX quality_finding_open ON quality_finding(entity_id, key, check_type, resolved_ms);
+    CREATE TABLE quality_score (
+        entity_id TEXT NOT NULL, key TEXT NOT NULL,         -- key '' = 엔티티 종합
+        score INTEGER, computed_ms INTEGER,
+        PRIMARY KEY (entity_id, key)
+    );
+    ALTER TABLE entity ADD COLUMN quality_checked_ms INTEGER;
+    """,
 ]
 
 

@@ -99,6 +99,17 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; 
 .status.good { color: var(--status-good-ink); } .status.good .dot { background: var(--status-good); }
 .status.warning { color: var(--status-warning-ink); } .status.warning .dot { background: var(--status-warning); }
 .status.critical { color: var(--status-critical-ink); } .status.critical .dot { background: var(--status-critical); }
+.status.info { color: var(--text-secondary); font-weight: 500; } .status.info .dot { background: var(--border-strong); }
+.badge.sem-review { border-color: var(--status-warning); color: var(--status-warning-ink); }
+.badge.sem-confirmed { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+.conf { display: inline-flex; align-items: center; gap: 6px; }
+.conf-bar { width: 56px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; display: inline-block; border: 1px solid var(--border); }
+.conf-bar span { display: block; height: 100%; background: var(--series-1); border-radius: 3px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; flex-wrap: wrap; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--text-secondary); }
+.tabs button.on { border-bottom-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.evidence { margin: 4px 0 0; padding-left: 18px; color: var(--text-secondary); font-size: 12.5px; }
+.editor { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px; background: var(--surface-2); border-radius: 6px; margin-top: 6px; }
 .banner { border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; border: 1px solid; }
 .banner.critical { background: var(--status-critical-soft); border-color: var(--status-critical); color: var(--status-critical-ink); }
 .banner.warning { background: var(--surface-1); border-color: var(--status-warning); color: var(--status-warning-ink); }

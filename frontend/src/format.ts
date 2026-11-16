@@ -50,6 +50,9 @@ export const CHANGE_LABEL: Record<string, { text: string; kind: "add" | "remove"
   TS_KEY_REMOVED: { text: "텔레메트리 키 삭제", kind: "remove" },
 };
 
+export const SEVERITY_LABEL = { critical: "심각", warning: "주의", info: "참고" } as const;
+export const SEM_STATUS_LABEL = { REVIEW: "검토 필요", AUTO: "자동 판정", CONFIRMED: "확정" } as const;
+
 export const ROLE_LABEL = { ADMIN: "관리자", ANALYST: "분석가", CUSTOMER_VIEWER: "고객 담당자" } as const;
 
 export const TASK_LABEL: Record<string, string> = {
@@ -57,8 +60,10 @@ export const TASK_LABEL: Record<string, string> = {
   SYNC_CUSTOMERS: "고객 목록",
   SYNC_ENTITY_LIST: "엔티티 목록",
   SYNC_ENTITY_DETAIL: "엔티티 상세",
-  PROFILE_KEYS: "키 보고 주기 측정",
+  PROFILE_KEYS: "키 분석 (샘플·범위)",
   FINISH_CYCLE: "주기 마무리",
+  QUALITY_CHECK: "일일 품질 점검",
+  ANALYZE_ALL: "전체 재분석",
 };
 
 export function fmtChangeValue(v: unknown, n = 40): string {

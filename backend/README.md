@@ -1,4 +1,4 @@
-# ThingLens 백엔드 (Phase 1)
+# ThingLens 백엔드 (Phase 1–2)
 
 ThingsBoard를 **저부하로 천천히** 읽어 로컬 DB(SQLite)에 메타데이터를 쌓고, REST API로 제공합니다.
 
@@ -27,6 +27,23 @@ ThingsBoard를 **저부하로 천천히** 읽어 로컬 DB(SQLite)에 메타데�
 | **[D] 접근 제어** | 로그인(scrypt), 역할(ADMIN/ANALYST/CUSTOMER_VIEWER), 고객(+하위 고객) 범위 필터, 감사 로그 | `auth/users.py`, `api/app.py` |
 
 웹 화면은 `frontend/`(사용법 `frontend/README.md`). `THINGLENS_WEB_DIR`를 지정하면 API 서버가 화면도 함께 제공합니다.
+
+## Phase 2 구현 범위 — 데이터 종류·의미 추론 + 데이터 품질
+
+| 기능 | 내용 | 코드 |
+|---|---|---|
+| 저부하 샘플·범위 수집 | 키당 최근·1일 전·7일 전 원시값(각 최대 60개) + **구간 1개짜리** MIN·MAX·COUNT (창은 키당 원시값 1만 개 이내) | `sync/analysis.py`, `tb/adapter.py` |
+| 데이터 종류 추론 | 연속 수치·누적 카운터·이진·범주형·타임스탬프·JSON·텍스트. 카운터는 '장기 평균 증가율 ≈ 국소 증가율'까지 확인 (느린 파형 오판 방지) | `semantics/infer.py` |
+| 의미 추론 | 의미 사전(한/영 32종) × 키 이름·단위 접미사·값 범위·데이터 종류·프로파일 이름 점수화 → 의미·단위·신뢰도·근거. 0.7 이상 자동, 미만은 검토 대기 | `semantics/dictionary.py`, `semantics/infer.py` |
+| 사용자 확정 | (프로파일, 키) 또는 키 이름 전체에 의미·단위 확정 → 해당 엔티티만 즉시 재분석 (TB 요청 없음) | `api/app.py` |
+| 속성 역할 | 위치·식별·버전·설정·상태·관리 정보, 정적/동적 (변경 이력 기반) | `semantics/infer.py` |
+| **[B] 품질 점검** | 데이터 없음·보고 중단·값 고정·값 변화 없음·물리 범위 이탈·급격한 튐·수신률 저하·미래 타임스탬프·카운터 리셋·숫자/문자 혼재 → 키·엔티티 점수(100점) | `quality/checks.py` |
+| 일일 품질 점검 | 매일 최근 샘플 + 24시간 범위만 새로 받아 재점검, 해소된 문제는 자동 종료 | `sync/handlers.py` |
+
+수집 일정: 키 분석은 주 1회(또는 키가 바뀌면), 품질 점검은 매일. 엔티티당 키 분석 약 10건, 품질 점검 약 4~7건의 TB 요청.
+
+실제 TB(CE 4.3.1 + Cassandra) 시드 데이터 결과: 키 31개 **데이터 종류 100%, 의미 자동 판정 100%** (LLM 없음),
+값 고정·드문 범위 이탈·데이터 없음 센서 모두 검출, 정상 센서 오탐 0, 엔티티 25개에 TB 요청 238건.
 
 ### 변경 감지 지연 (저부하를 위한 절충)
 
@@ -64,7 +81,9 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | `THINGLENS_TZ` | Asia/Seoul | 시간대 창 기준 |
 | `THINGLENS_META_SYNC_INTERVAL_H` | 6 | 엔티티 목록 동기화 주기 |
 | `THINGLENS_DETAIL_SYNC_INTERVAL_H` | 24 | 관계·속성·키 재확인 주기 |
-| `THINGLENS_PROFILE_INTERVAL_D` | 7 | 키 보고 주기 재측정 주기 |
+| `THINGLENS_PROFILE_INTERVAL_D` | 7 | 키 분석(샘플 3개 창 + 7일 범위) 주기 |
+| `THINGLENS_QUALITY_INTERVAL_H` | 24 | 품질 점검(최근 샘플 + 24시간 범위) 주기 |
+| `THINGLENS_SAMPLE_POINTS` | 60 | 창당 키별 원시값 수 |
 | `TB_CA_BUNDLE` / `TB_VERIFY_TLS` | - / true | 사내 인증서 |
 | `THINGLENS_WEB_DIR` | - | 빌드된 웹 화면 경로 (`frontend/dist`). 지정 시 `/` 에서 화면 제공 |
 
@@ -85,6 +104,12 @@ export TB_URL=https://tb.사내주소 TB_USERNAME=thinglens-reader@회사 TB_PAS
 | GET | `/api/customers` | 로그인(범위 적용) | 고객 목록·소유 엔티티 수 |
 | GET | `/api/changes?entity_id=&change_type=&since_ms=` | 로그인(범위 적용) | 변경 이력 |
 | GET | `/api/catalog/tiers` | 로그인(범위 적용) | 키 보고 주기 등급 분포 |
+| GET | `/api/catalog/keys?status=&semantic=&q=` | 로그인(범위 적용) | (프로파일, 키)별 데이터 종류·의미·단위·신뢰도·근거·품질 — 검토 대기 먼저 |
+| GET | `/api/catalog/semantic-groups` | 로그인(범위 적용) | 같은 의미의 키 묶음 (이름 변형 포함) |
+| GET | `/api/catalog/attributes` | 로그인(범위 적용) | 속성 키 역할·정적/동적 |
+| GET/POST/DELETE | `/api/catalog/rules` | 확정은 ADMIN·ANALYST | 의미 확정·취소 (감사 기록, 즉시 재분석) |
+| GET | `/api/quality/summary` | 로그인(범위 적용) | 평균 점수·분포·항목별 미해결 건수·점수 낮은 엔티티 |
+| GET | `/api/quality/findings?severity=&check=&entity_id=` | 로그인(범위 적용) | 품질 문제 목록 |
 | GET/POST | `/api/users` | ADMIN | 사용자 관리 |
 | GET | `/api/audit` | ADMIN | 감사 로그 |
 
@@ -93,7 +118,7 @@ API 문서(자동): `http://<서버>:8000/docs`
 ## 테스트
 
 ```bash
-.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (37개)
+.venv/bin/pytest -q                                  # 단위·가짜 TB 테스트 (61개)
 THINGLENS_IT_TB_URL=http://localhost:8080 .venv/bin/pytest -m integration -s   # 실제 테스트 TB (deploy/test-env + 시드)
 ```
 

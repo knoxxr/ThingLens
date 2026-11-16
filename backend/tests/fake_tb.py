@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.parse
 import uuid
@@ -26,6 +27,23 @@ class FakeTb:
         self.fail: dict[str, list[int]] = {}  # path prefix -> [status, ...] 순서대로 1회씩
         self.token_gen = 0
         self.now_ms = int(time.time() * 1000)
+        self.agg_requests: list[tuple[str, int]] = []
+
+    def points(self, spec, start, end, limit):
+        """spec: 주기(초) 또는 {"interval": 초, "gen": fn(ts)->값, "until": 마지막 ts}. 최신부터 limit개."""
+        if isinstance(spec, dict):
+            iv, gen, until = spec["interval"], spec.get("gen"), spec.get("until", self.now_ms)
+        else:
+            iv, gen, until = spec, None, self.now_ms
+        gen = gen or (lambda t: f"{20 + 5 * math.sin(t / 3_600_000):.3f}")
+        step = int(iv * 1000)
+        t = min(until, end)
+        t -= (t - until) % step if t < until else 0
+        n = 0
+        while t >= start and n < limit:
+            yield t, gen(t)
+            t -= step
+            n += 1
 
     # -- 모델 조작 ---------------------------------------------------------------
     def add_customer(self, title, parent=None) -> str:
@@ -96,19 +114,25 @@ class FakeTb:
             if tail == "keys/timeseries":
                 return httpx.Response(200, json=list(ent["ts"].keys()))
             if tail == "values/timeseries":
-                assert qs.get("agg") == "NONE", "서버 집계 사용 금지 (Phase 0 결정)"
+                start, end = int(qs["startTs"]), int(qs["endTs"])
+                agg = qs.get("agg", "NONE")
+                if agg != "NONE":  # Phase 0 결정: 구간 1개짜리 집계만 허용
+                    assert int(qs["interval"]) == end - start, "구간이 여러 개인 서버 집계 사용 금지"
+                    self.agg_requests.append((agg, end - start))
                 out = {}
                 for k in qs["keys"].split(","):
-                    iv = ent["ts"].get(k)
-                    if iv is None:
+                    spec = ent["ts"].get(k)
+                    if spec is None:
                         continue
-                    pts, t = [], self.now_ms
-                    while t >= int(qs["startTs"]) and len(pts) < int(qs["limit"]):
-                        if t <= int(qs["endTs"]):
-                            pts.append({"ts": t, "value": "1.5"})
-                        t -= int(iv * 1000)
-                    if pts:
-                        out[k] = pts
+                    if agg == "NONE":
+                        pts = list(self.points(spec, start, end, int(qs["limit"])))
+                        if pts:
+                            out[k] = [{"ts": t, "value": v} for t, v in pts]
+                    else:
+                        vals = [float(v) for _, v in self.points(spec, start, end, 10**9)]
+                        if vals:
+                            r = {"MIN": min(vals), "MAX": max(vals), "COUNT": len(vals)}[agg]
+                            out[k] = [{"ts": (start + end) // 2, "value": str(r)}]
                 return httpx.Response(200, json=out)
         return httpx.Response(404, json={"message": f"no route {path}"})
 

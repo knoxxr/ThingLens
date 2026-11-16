@@ -13,12 +13,23 @@ from pydantic import BaseModel
 from ..auth import users
 from ..config import Settings
 from ..db import connect, loads, now_ms
+from ..quality.checks import CHECK_KO
 from ..scheduler import queue as q
+from ..semantics.dictionary import ATTRIBUTE_ROLES, SEMANTICS
+from ..semantics.infer import DATA_TYPE_KO
+from ..sync.analysis import analyze_entity
 
 
 class LoginReq(BaseModel):
     login: str
     password: str
+
+
+class RuleReq(BaseModel):
+    profile: str | None = None      # None = 모든 프로파일의 같은 키 이름
+    key: str
+    semantic: str                   # SEMANTICS 의 id 또는 'unknown'(의미 없음 확정)
+    unit: str | None = None
 
 
 class UserCreateReq(BaseModel):
@@ -214,7 +225,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                               "from_type": r["other_type"]} for r in rel_to],
             "attributes": [{"scope": a["scope"], "key": a["key"], "value": loads(a["value_json"]),
                             "last_update_ts": a["last_update_ts"]} for a in attrs],
-            "timeseries_keys": [dict(k) for k in keys],
+            "timeseries_keys": [dict(k) | _key_extra(conn, entity_id, k["key"]) for k in keys],
+            "attribute_roles": {f'{r["scope"]}.{r["key"]}': {"role": r["role"], "dynamic": bool(r["dynamic"])}
+                                for r in conn.execute("SELECT scope, key, role, dynamic FROM key_analysis"
+                                                      " WHERE entity_id=? AND source='ATTR'", (entity_id,))},
+            "quality_score": (conn.execute("SELECT score FROM quality_score WHERE entity_id=? AND key=''",
+                                           (entity_id,)).fetchone() or [None])[0],
         }
 
     @app.get("/api/changes")
@@ -276,6 +292,176 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             " AS entities FROM customer c ORDER BY title").fetchall()
         return [dict(r) for r in rows if scope is None or r["id"] in scope]
 
+    # -- 데이터 카탈로그 (Phase 2) ---------------------------------------------------
+    @app.get("/api/catalog/meta")
+    def catalog_meta(user: User):
+        return {"semantics": {k: {"ko": v["ko"], "default_unit": v["default_unit"]} for k, v in SEMANTICS.items()},
+                "roles": {k: v["ko"] for k, v in ATTRIBUTE_ROLES.items()},
+                "data_types": {k or "": v for k, v in DATA_TYPE_KO.items()},
+                "checks": CHECK_KO}
+
+    @app.get("/api/catalog/keys")
+    def catalog_keys(conn: Db, user: User, status: str | None = None, semantic: str | None = None,
+                     q_: str | None = Query(None, alias="q")):
+        """텔레메트리 키를 (프로파일, 키 이름) 단위로 묶어 보여준다 — 검토·확정도 이 단위."""
+        where, args = scope_sql(conn, user)
+        rows = conn.execute(
+            "SELECT e.profile, a.key, a.data_type, a.semantic, a.unit, a.unit_source, a.confidence, a.status,"
+            " a.evidence_json, a.alternatives_json, p.tier, p.interval_s, s.score"
+            " FROM key_analysis a JOIN entity e ON e.id=a.entity_id"
+            " LEFT JOIN key_profile p ON p.entity_id=a.entity_id AND p.key=a.key"
+            " LEFT JOIN quality_score s ON s.entity_id=a.entity_id AND s.key=a.key"
+            f" WHERE a.source='TS' AND e.deleted_ms IS NULL AND {where}", args).fetchall()
+        groups: dict = {}
+        for r in rows:
+            g = groups.setdefault((r["profile"], r["key"]), {"profile": r["profile"], "key": r["key"], "entities": 0,
+                                                               "_sem": {}, "_dt": {}, "_tier": {}, "_conf": [],
+                                                               "_scores": [], "_iv": [], "status": "AUTO",
+                                                               "unit": None, "evidence": None, "alternatives": []})
+            g["entities"] += 1
+            for f, v in (("_sem", r["semantic"]), ("_dt", r["data_type"]), ("_tier", r["tier"])):
+                g[f][v] = g[f].get(v, 0) + 1
+            g["_conf"].append(r["confidence"] or 0)
+            if r["score"] is not None:
+                g["_scores"].append(r["score"])
+            if r["interval_s"]:
+                g["_iv"].append(r["interval_s"])
+            rank = {"CONFIRMED": 3, "REVIEW": 2, "AUTO": 1}
+            if r["status"] == "CONFIRMED" or (rank[r["status"]] > rank[g["status"]] and g["status"] != "CONFIRMED"):
+                g["status"] = r["status"]
+            if g["evidence"] is None or r["status"] == "REVIEW":
+                g["evidence"], g["alternatives"], g["unit"] = loads(r["evidence_json"]), loads(r["alternatives_json"]), r["unit"]
+                g["unit_source"] = r["unit_source"]
+        out = []
+        for g in groups.values():
+            sem = max(g["_sem"], key=g["_sem"].get)
+            item = {k: v for k, v in g.items() if not k.startswith("_")} | {
+                "semantic": sem, "semantic_split": len(g["_sem"]) > 1,
+                "data_type": max(g["_dt"], key=lambda k: g["_dt"][k]),
+                "tiers": g["_tier"], "confidence": round(min(g["_conf"]), 2),
+                "interval_s": min(g["_iv"]) if g["_iv"] else None,
+                "quality_avg": round(sum(g["_scores"]) / len(g["_scores"])) if g["_scores"] else None}
+            if status and item["status"] != status:
+                continue
+            if semantic and item["semantic"] != semantic:
+                continue
+            if q_ and q_.lower() not in item["key"].lower():
+                continue
+            out.append(item)
+        out.sort(key=lambda i: ({"REVIEW": 0, "AUTO": 1, "CONFIRMED": 2}[i["status"]], i["semantic"], i["key"]))
+        return out
+
+    @app.get("/api/catalog/semantic-groups")
+    def semantic_groups(conn: Db, user: User):
+        """같은 의미의 키 묶음 — 이름이 달라도 같은 의미면 한 그룹 (계획서 §5.0 (4))."""
+        where, args = scope_sql(conn, user)
+        rows = conn.execute(
+            "SELECT a.semantic, a.key, a.unit, COUNT(*) n FROM key_analysis a JOIN entity e ON e.id=a.entity_id"
+            f" WHERE a.source='TS' AND e.deleted_ms IS NULL AND {where} AND a.status IN ('AUTO','CONFIRMED')"
+            " GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC", args).fetchall()
+        out: dict = {}
+        for r in rows:
+            g = out.setdefault(r["semantic"], {"semantic": r["semantic"],
+                                               "ko": SEMANTICS.get(r["semantic"], {}).get("ko", "모름"),
+                                               "keys": [], "entities": 0, "units": set()})
+            g["keys"].append({"key": r["key"], "entities": r["n"], "unit": r["unit"]})
+            g["entities"] += r["n"]
+            if r["unit"]:
+                g["units"].add(r["unit"])
+        return sorted(({**g, "units": sorted(g["units"])} for g in out.values()), key=lambda g: -g["entities"])
+
+    @app.get("/api/catalog/attributes")
+    def catalog_attributes(conn: Db, user: User):
+        where, args = scope_sql(conn, user)
+        rows = conn.execute(
+            "SELECT a.scope, a.key, a.role, SUM(a.dynamic) dyn, COUNT(*) n FROM key_analysis a"
+            f" JOIN entity e ON e.id=a.entity_id WHERE a.source='ATTR' AND e.deleted_ms IS NULL AND {where}"
+            " GROUP BY 1, 2, 3 ORDER BY 3, 5 DESC", args).fetchall()
+        return [{"scope": r["scope"], "key": r["key"], "role": r["role"], "entities": r["n"],
+                 "dynamic": r["dyn"] > 0} for r in rows]
+
+    @app.get("/api/catalog/rules")
+    def list_rules(conn: Db, user: User):
+        return [dict(r) for r in conn.execute("SELECT * FROM semantic_rule ORDER BY created_ms DESC")]
+
+    def _reanalyze(conn, profile, key):
+        sql = "SELECT DISTINCT e.id FROM entity e JOIN ts_key k ON k.entity_id=e.id WHERE k.key=? AND e.deleted_ms IS NULL"
+        args = [key]
+        if profile is not None:
+            sql += " AND e.profile IS ?"
+            args.append(profile)
+        ids = [r[0] for r in conn.execute(sql, args)]
+        for eid in ids:
+            analyze_entity(conn, eid)
+        return len(ids)
+
+    @app.post("/api/catalog/rules")
+    def add_rule(req: RuleReq, conn: Db, user: User):
+        """의미 확정 (사용자 피드백). 같은 (프로파일, 키)에 다시 저장하면 덮어쓴다. 해당 엔티티만 즉시 재분석."""
+        require(user, "ADMIN", "ANALYST")
+        if req.semantic != "unknown" and req.semantic not in SEMANTICS:
+            raise HTTPException(400, f"알 수 없는 의미: {req.semantic}")
+        conn.execute("DELETE FROM semantic_rule WHERE key=? AND profile IS ?", (req.key, req.profile))
+        conn.execute("INSERT INTO semantic_rule (profile, key, semantic, unit, created_by, created_ms)"
+                     " VALUES (?,?,?,?,?,?)", (req.profile, req.key, req.semantic, req.unit, user["login"], now_ms()))
+        n = _reanalyze(conn, req.profile, req.key)
+        users.audit(conn, user["id"], user["login"], "SEMANTIC_CONFIRM", f"{req.profile or '*'}/{req.key}",
+                    {"semantic": req.semantic, "unit": req.unit})
+        return {"reanalyzed_entities": n}
+
+    @app.delete("/api/catalog/rules/{rule_id}")
+    def delete_rule(rule_id: int, conn: Db, user: User):
+        require(user, "ADMIN", "ANALYST")
+        r = conn.execute("SELECT * FROM semantic_rule WHERE id=?", (rule_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404, "확정 기록이 없습니다")
+        conn.execute("DELETE FROM semantic_rule WHERE id=?", (rule_id,))
+        n = _reanalyze(conn, r["profile"], r["key"])
+        users.audit(conn, user["id"], user["login"], "SEMANTIC_UNCONFIRM", f"{r['profile'] or '*'}/{r['key']}")
+        return {"reanalyzed_entities": n}
+
+    # -- 데이터 품질 (Phase 2 [B]) -------------------------------------------------
+    @app.get("/api/quality/summary")
+    def quality_summary(conn: Db, user: User):
+        where, args = scope_sql(conn, user)
+        scores = conn.execute(
+            "SELECT e.id, e.name, e.entity_type, e.profile, s.score FROM quality_score s JOIN entity e ON e.id=s.entity_id"
+            f" WHERE s.key='' AND e.deleted_ms IS NULL AND {where} ORDER BY s.score, e.name", args).fetchall()
+        buckets = {"90~100": 0, "70~89": 0, "50~69": 0, "0~49": 0}
+        for r in scores:
+            s = r["score"]
+            buckets["90~100" if s >= 90 else "70~89" if s >= 70 else "50~69" if s >= 50 else "0~49"] += 1
+        by_check = conn.execute(
+            "SELECT f.check_type, f.severity, COUNT(*) n FROM quality_finding f JOIN entity e ON e.id=f.entity_id"
+            f" WHERE f.resolved_ms IS NULL AND e.deleted_ms IS NULL AND {where} GROUP BY 1, 2 ORDER BY 3 DESC",
+            args).fetchall()
+        return {"entities_scored": len(scores),
+                "average": round(sum(r["score"] for r in scores) / len(scores)) if scores else None,
+                "buckets": buckets,
+                "open_by_check": [{"check": r["check_type"], "check_ko": CHECK_KO.get(r["check_type"]),
+                                   "severity": r["severity"], "count": r["n"]} for r in by_check],
+                "worst": [dict(r) for r in scores[:10]]}
+
+    @app.get("/api/quality/findings")
+    def quality_findings(conn: Db, user: User, severity: str | None = None, check: str | None = None,
+                         entity_id: str | None = None, include_resolved: bool = False,
+                         limit: int = Query(500, le=5000)):
+        where, args = scope_sql(conn, user)
+        sql = ("SELECT f.*, e.name AS entity_name, e.profile FROM quality_finding f JOIN entity e ON e.id=f.entity_id"
+               f" WHERE e.deleted_ms IS NULL AND {where}")
+        if not include_resolved:
+            sql += " AND f.resolved_ms IS NULL"
+        for col, val in (("f.severity", severity), ("f.check_type", check), ("f.entity_id", entity_id)):
+            if val:
+                sql += f" AND {col}=?"
+                args.append(val)
+        sql += (" ORDER BY CASE f.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,"
+                " f.last_detected_ms DESC LIMIT ?")
+        rows = conn.execute(sql, [*args, limit]).fetchall()
+        return [{k: r[k] for k in ("id", "entity_id", "entity_name", "profile", "key", "check_type", "severity",
+                                   "message", "first_detected_ms", "last_detected_ms", "resolved_ms")}
+                | {"check_ko": CHECK_KO.get(r["check_type"]), "detail": loads(r["detail_json"])} for r in rows]
+
     @app.get("/api/catalog/tiers")
     def tiers(conn: Db, user: User):
         where, args = scope_sql(conn, user)
@@ -304,6 +490,23 @@ def _mount_web(app: FastAPI, settings: Settings) -> None:
         if path and target.startswith(root + os.sep) and os.path.isfile(target):
             return FileResponse(target)
         return FileResponse(os.path.join(root, "index.html"))
+
+
+def _key_extra(conn, entity_id, key) -> dict:
+    a = conn.execute("SELECT data_type, semantic, unit, unit_source, confidence, status, evidence_json"
+                     " FROM key_analysis WHERE entity_id=? AND source='TS' AND key=?", (entity_id, key)).fetchone()
+    s = conn.execute("SELECT score FROM quality_score WHERE entity_id=? AND key=?", (entity_id, key)).fetchone()
+    f = conn.execute("SELECT check_type, severity, message FROM quality_finding WHERE entity_id=? AND key=?"
+                     " AND resolved_ms IS NULL", (entity_id, key)).fetchall()
+    return {
+        "data_type": a["data_type"] if a else None, "semantic": a["semantic"] if a else None,
+        "unit": a["unit"] if a else None, "unit_source": a["unit_source"] if a else None,
+        "confidence": a["confidence"] if a else None, "semantic_status": a["status"] if a else None,
+        "evidence": loads(a["evidence_json"]) if a else [],
+        "quality_score": s["score"] if s else None,
+        "findings": [{"check": r["check_type"], "check_ko": CHECK_KO.get(r["check_type"]), "severity": r["severity"],
+                      "message": r["message"]} for r in f],
+    }
 
 
 def _user_out(u) -> dict:

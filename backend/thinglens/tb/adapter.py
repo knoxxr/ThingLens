@@ -144,6 +144,18 @@ class TbAdapter:
         return self.client.get(f"/api/plugins/telemetry/{entity_type}/{entity_id}/keys/timeseries",
                                category="keys") or []
 
+    def ts_agg(self, entity_type: str, entity_id: str, keys: list[str], start_ts: int, end_ts: int,
+               agg: str) -> dict[str, list[dict]]:
+        """**구간 1개짜리** 집계만 허용 (interval = 전체 구간). 구간이 여러 개면 구간마다 Cassandra 조회가
+        생기므로(Phase 0 실측) 이 함수로는 요청할 수 없다."""
+        if agg not in ("MIN", "MAX", "COUNT", "AVG", "SUM"):
+            raise ValueError(agg)
+        return self.client.get(
+            f"/api/plugins/telemetry/{entity_type}/{entity_id}/values/timeseries",
+            params={"keys": ",".join(keys), "startTs": start_ts, "endTs": end_ts, "interval": end_ts - start_ts,
+                    "agg": agg, "limit": 10},
+            category="envelope") or {}
+
     def ts_raw(self, entity_type: str, entity_id: str, keys: list[str], start_ts: int, end_ts: int,
                limit: int, order: str = "DESC") -> dict[str, list[dict]]:
         """원시값 조회 (agg=NONE). Cassandra 실측 결과 서버 집계는 사용하지 않는다 (docs/phase0)."""

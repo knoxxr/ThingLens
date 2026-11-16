@@ -250,7 +250,8 @@ def main(argv=None):
 
     password = os.environ.get("TB_PASSWORD") or getpass.getpass("테스트 TB 비밀번호: ")
     tb = Tb(args.url, args.username, password)
-    now_ms = int(time.time() // 60) * MIN_MS
+    # 15분 경계로 맞춤 → 다시 실행해도 같은 타임스탬프에 덮어씀 (주기가 다른 격자가 섞이지 않게)
+    now_ms = int(time.time() // 900) * 15 * MIN_MS
     dev, truth = build_dataset(now_ms, args.days)
 
     print("에셋·관계 생성")

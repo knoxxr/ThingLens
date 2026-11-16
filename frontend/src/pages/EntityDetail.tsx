@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { api, type Change, type EntityDetail as Detail } from "../api";
-import { ChangeLabel, ErrorBox, Loading, TierBadge } from "../components/bits";
+import { api, type CatalogMeta, type Change, type EntityDetail as Detail } from "../api";
+import { ChangeLabel, Confidence, ErrorBox, Loading, ScoreBadge, SemStatusBadge, SeverityLabel, TierBadge } from "../components/bits";
 import { fmtAgo, fmtChangeValue, fmtInterval, fmtTime, short } from "../format";
 
 const SCOPE_LABEL: Record<string, string> = { SERVER_SCOPE: "서버", SHARED_SCOPE: "공유", CLIENT_SCOPE: "클라이언트" };
@@ -10,6 +10,8 @@ export default function EntityDetail() {
   const { id } = useParams();
   const d = useQuery({ queryKey: ["entity", id], queryFn: () => api<Detail>(`/api/entities/${id}`) });
   const ch = useQuery({ queryKey: ["changes", id], queryFn: () => api<Change[]>(`/api/changes?entity_id=${id}&limit=50`) });
+  const meta = useQuery({ queryKey: ["catalog-meta"], queryFn: () => api<CatalogMeta>("/api/catalog/meta"), staleTime: Infinity });
+  const semKo = (s: string | null) => !s ? "-" : s === "unknown" ? "모름" : meta.data?.semantics[s]?.ko ?? s;
   if (d.isLoading) return <Loading />;
   if (d.error) return <ErrorBox error={d.error} />;
   const e = d.data!;
@@ -29,6 +31,7 @@ export default function EntityDetail() {
         <div className="card">
           <h2>기본 정보</h2>
           <dl className="kv">
+            <dt>품질 점수</dt><dd><ScoreBadge score={e.quality_score} /></dd>
             <dt>소유 고객</dt><dd>{e.owner_name ?? "테넌트"}</dd>
             <dt>TB ID</dt><dd className="mono">{e.id}</dd>
             <dt>생성</dt><dd>{fmtTime(e.created_time)}</dd>
@@ -55,18 +58,21 @@ export default function EntityDetail() {
         <h2 style={{ padding: "16px 18px 0" }}>텔레메트리 키 ({e.timeseries_keys.length})</h2>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>키</th><th>보고 주기 등급</th><th className="num">보고 주기</th><th>값 형태</th><th>마지막 값</th></tr></thead>
+            <thead><tr><th>키</th><th>의미</th><th>데이터 종류</th><th>판정</th><th>보고 주기</th><th className="num">품질</th><th>문제</th><th>마지막 값</th></tr></thead>
             <tbody>
               {e.timeseries_keys.map((k) => (
                 <tr key={k.key}>
                   <td className="mono">{k.key}</td>
-                  <td><TierBadge tier={k.tier} />{k.irregular ? <span className="sub"> 불규칙</span> : null}</td>
-                  <td className="num">{fmtInterval(k.interval_s)}</td>
-                  <td>{k.value_kind ?? "-"}</td>
-                  <td className="sub">{fmtAgo(k.last_ts)}</td>
+                  <td title={k.evidence.join("\n")}><b>{semKo(k.semantic)}</b>{k.unit ? <span className="sub"> {k.unit}</span> : null}</td>
+                  <td>{meta.data?.data_types[k.data_type ?? ""] ?? "-"}</td>
+                  <td><SemStatusBadge s={k.semantic_status} /> <Confidence v={k.confidence} /></td>
+                  <td><TierBadge tier={k.tier} /> <span className="sub">{fmtInterval(k.interval_s)}{k.irregular ? " 불규칙" : ""}</span></td>
+                  <td className="num"><ScoreBadge score={k.quality_score} /></td>
+                  <td>{k.findings.length ? k.findings.map((f) => <div key={f.check}><SeverityLabel s={f.severity} /> {f.message}</div>) : <span className="sub">없음</span>}</td>
+                  <td className="sub nowrap">{fmtAgo(k.last_ts)}</td>
                 </tr>
               ))}
-              {!e.timeseries_keys.length && <tr><td colSpan={5} className="empty">텔레메트리 키 없음</td></tr>}
+              {!e.timeseries_keys.length && <tr><td colSpan={8} className="empty">텔레메트리 키 없음</td></tr>}
             </tbody>
           </table>
         </div>
@@ -77,12 +83,17 @@ export default function EntityDetail() {
           <h2 style={{ padding: "16px 18px 0" }}>속성 ({e.attributes.length})</h2>
           <div className="table-wrap">
             <table>
-              <thead><tr><th>범위</th><th>키</th><th>값</th></tr></thead>
+              <thead><tr><th>범위</th><th>키</th><th>역할</th><th>값</th></tr></thead>
               <tbody>
-                {e.attributes.map((a) => (
-                  <tr key={a.scope + a.key}><td>{SCOPE_LABEL[a.scope] ?? a.scope}</td><td className="mono">{a.key}</td><td title={JSON.stringify(a.value)}>{short(a.value)}</td></tr>
-                ))}
-                {!e.attributes.length && <tr><td colSpan={3} className="empty">속성 없음</td></tr>}
+                {e.attributes.map((a) => {
+                  const r = e.attribute_roles[`${a.scope}.${a.key}`];
+                  return (
+                    <tr key={a.scope + a.key}><td>{SCOPE_LABEL[a.scope] ?? a.scope}</td><td className="mono">{a.key}</td>
+                      <td>{r ? <>{meta.data?.roles[r.role] ?? r.role}{r.dynamic ? <span className="sub"> · 동적</span> : null}</> : "-"}</td>
+                      <td title={JSON.stringify(a.value)}>{short(a.value)}</td></tr>
+                  );
+                })}
+                {!e.attributes.length && <tr><td colSpan={4} className="empty">속성 없음</td></tr>}
               </tbody>
             </table>
           </div>
